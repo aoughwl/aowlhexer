@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Demonstrate that aifhexer+aifopt is measurably better than stock hexer/lengc:
+// Demonstrate that aowlhexer+aifopt is measurably better than stock hexer/lengc:
 // on real hexer output it removes the dead code hexer leaves in every proc, then
 // proves the optimized IR still compiles to identical results.
 //

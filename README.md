@@ -1,4 +1,4 @@
-# aifhexer
+# aowlhexer
 
 The **aowl lowering pass** — it takes a semantically-checked AIF module
 (`.s.aif`, the aowl intermediate format) and lowers it to the C-shaped
@@ -9,7 +9,7 @@ aowl-owned.
 
 ## What it does — the hard part of the compiler
 
-`aifhexer` is where the genuinely difficult compiler work happens, so that the
+`aowlhexer` is where the genuinely difficult compiler work happens, so that the
 backends downstream can be mere printers:
 
 | pass | effect |
@@ -28,7 +28,7 @@ Because ARC is injected here, every backend that consumes `.c.aif` gets
 ## Ours vs reused
 
 The 25 lowering passes under `src/` are vendored from Araq's `nimony/hexer` and
-are what aifhexer owns and will progressively rewrite. The shared compiler
+are what aowlhexer owns and will progressively rewrite. The shared compiler
 library (NIF/AIF reader, symbol tables, config, models) is reused from a
 `nimony` source checkout via `$NIMONY_SRC` until an aowl-owned core exists — the
 build copies it into `.build/` and overlays `src/` on top so intra-tree
@@ -39,25 +39,25 @@ build copies it into `.build/` and overlays `src/` on top so intra-tree
 Needs classic Nim and a nimony source checkout:
 
 ```sh
-NIMONY_SRC=~/nimony/src ./build.sh          # → bin/aifhexer
+NIMONY_SRC=~/nimony/src ./build.sh          # → bin/aowlhexer
 NIMONY_SRC=~/nimony/src ./build.sh --fresh   # re-copy the shared infra first
 ```
 
 ## Use
 
 ```sh
-bin/aifhexer c module.s.aif    # lower a semchecked module to .c.aif
-bin/aifhexer d a.aif b.aif …   # dead-code elimination across modules
+bin/aowlhexer c module.s.aif    # lower a semchecked module to .c.aif
+bin/aowlhexer d a.aif b.aif …   # dead-code elimination across modules
 ```
 
 Drop-in for nimony's `hexer`: the [aifmony](https://github.com/aoughwl/aifmony)
-driver injects `bin/aifhexer` in place of `hexer` (via nimony's
+driver injects `bin/aowlhexer` in place of `hexer` (via nimony's
 `findTool("hexer")` lookup), so a full build reads
-`.nim → nifparser → sem → aifhexer → aifc → gcc`.
+`.nim → nifparser → sem → aowlhexer → aifc → gcc`.
 
 ## Verified
 
-Built from Araq's passes, `aifhexer` produces the same `.c.aif` as nimony's
+Built from Araq's passes, `aowlhexer` produces the same `.c.aif` as nimony's
 `hexer`, and in the aifmony pipeline the resulting native binaries return correct
 results (`fib(20)=6765`, `ack(3,4)=125`, `fib(25)=75025`). It is the lowering
 stage in aifmony's default pipeline today.

@@ -1,5 +1,5 @@
 {
-  "name": "aifhexer-opt",
+  "name": "aowlhexer-opt",
   "version": "0.1.0",
   "description": "aifopt — the AIF (.c.aif) optimizer that stock hexer/lengc lacks",
   "scripts": { "test": "node opt/demo.js" },
