@@ -53,7 +53,7 @@ bin/aowlhexer d a.aif b.aif …   # dead-code elimination across modules
 Drop-in for nimony's `hexer`: the [aifmony](https://github.com/aoughwl/aifmony)
 driver injects `bin/aowlhexer` in place of `hexer` (via nimony's
 `findTool("hexer")` lookup), so a full build reads
-`.nim → nifparser → sem → aowlhexer → aifc → gcc`.
+`.nim → nifparser → sem → aowlhexer → aowlc → gcc`.
 
 ## Verified
 
@@ -62,93 +62,29 @@ Built from Araq's passes, `aowlhexer` produces the same `.c.aif` as nimony's
 results (`fib(20)=6765`, `ack(3,4)=125`, `fib(25)=75025`). It is the lowering
 stage in aifmony's default pipeline today.
 
-## Better than stock hexer — the optimization layer (`opt/aifopt.js`)
+## An IR optimizer was prototyped, then removed
 
-Stock hexer/lengc lowers *correctly* but leaves measurable slack in the `.c.aif`:
-**every** proc it emits carries an unreachable trailing `return result`, the dead
-`result` variable behind it, and a dead loop label — plus deeply nested
-single-child `(stmts (stmts …))` blocks and un-folded constant arithmetic.
-`aifopt` is the fixpoint simplifier a stock pipeline omits. It removes all of it
-and re-emits a valid `.c.aif`.
-
-Concretely, the `gcd` proc — **before** (stock hexer → C) and **after** (+aifopt):
-
-```c
-NI64 gcd(NI64 a, NI64 b) {          NI64 gcd(NI64 a, NI64 b) {
-  NI64 result_0;         // dead      NI64 x = a;
-  NI64 x = a;                         NI64 y = b;
-  NI64 y = b;                         { while (!(y == 0)) {
-  { while (!(y == 0)) {                   NI64 t = y; y = x % y; x = t;
-      NI64 t = y; y = x % y; x = t;   } }
-  } }                                 return x;
-  whileStmtLabel_0: ;    // dead    }
-  return x;
-  return result_0;       // unreachable
-}
-```
-
-Measured on real hexer output (`node opt/demo.js`):
-
-| file | IR nodes | dead rets | dead vars | dead labels |
-|---|---|---|---|---|
-| compute | 486 → 444 (−8.6%) | 12 → 8 | 12 → 8 | 4 → 0 |
-| fib | 254 → 241 (−5.1%) | 7 → 5 | 6 → 5 | 1 → 0 |
-| mathf | 330 → 317 (−3.9%) | 12 → 10 | 5 → 4 | 1 → 0 |
-| **total** | **1070 → 1002 (−6.4%)** | **31 → 23** | **23 → 17** | **6 → 0** |
-
-**8/8** optimized programs return identical results — the cleanup is behaviour-
-preserving. Passes: unreachable-code elimination, dead-variable elimination,
-dead-label elimination, `(stmts (stmts …))` flattening, integer constant folding,
-and algebraic identities (`x+0`, `x*1`, `x*0`, …), run to a fixpoint.
-
-There is also an **ARC pass**, `moveDestroyElim`: hexer's mover emits
-`=wasMoved(v)` when a value moves out of `v`, but the destroyer independently
-emits `=destroy(v)` at scope exit. Since `=wasMoved` sets `v.data := nil` and
-`=destroy` is `if v.data != nil: dealloc`, an `=destroy(v)` that a `=wasMoved(v)`
-unconditionally dominates is a provable no-op. aifopt removes it — soundly (an
-emptied owner has nothing to free). On a seq round-trip it cuts `=destroy` call
-sites 7 → 1.
-
-### Does this actually beat the stock pipeline? (measured — mostly no)
-
-We tested honestly, by disassembly. **`gcc -O2` subsumes all of the above.** Dead
-code goes at any `-O`; the move/destroy ARC redundancy goes at `-O2`, because gcc
-inlines the small in-TU `=destroy`, const-propagates the `nil` from the inlined
-`=wasMoved`, and elides the call:
-
-| opt level | `=destroy` calls left in the round-trip proc |
-|---|---|
-| `-O0` / `-O1` | **2** (gcc keeps the redundant one) |
-| `-O2` / `-O3` | **0** (gcc does the elision itself) |
-
-This is almost certainly **why Araq leaves it**: hexer/lengc emit canonical,
-simple C and defer local cleanup to a world-class C optimizer — and lengc's own
-output carries the identical dead code. So aifopt's honest value is narrower than
-"beats hexer":
-
-- **`-O0`/`-O1` debug builds** — real: fewer instructions, faster debug builds.
-- **cross-TU ARC** — when a type's `=destroy` is *not* inlined (large body or a
-  different module without LTO), gcc keeps the redundant call and aifopt removes it.
-- **backend-independent** — it shrinks the JS backend's input and the readable C.
-
-It runs by default in [aifmony](https://github.com/aoughwl/aifmony)
-(`AIFMONY_NO_OPT=1` disables).
+An `aifopt` pass (dead-code / dead-var / dead-label elimination, nested-`stmts`
+flattening, constant folding, and a move-aware `=destroy` elision) was built to
+clean up the slack stock hexer/lengc leaves in the `.c.aif`. **It was removed.**
+Measured by disassembly, `gcc -O2` subsumes all of it: dead code goes at any
+`-O`, and the move/destroy ARC redundancy goes at `-O2` (gcc inlines the small
+in-TU `=destroy`, const-propagates the `nil` from the inlined `=wasMoved`, and
+elides the call — 2 redundant `=destroy` calls at `-O0`/`-O1` → 0 at `-O2`).
+lengc's own C output carries the identical dead code, so Araq *deliberately*
+defers local cleanup to the C optimizer. The pass also stripped the NIF index, so
+its output wasn't consumable by the real toolchain. Net-negative on the
+`aowlc → gcc` path — gone.
 
 ## Roadmap — where a Nim-level optimizer genuinely beats `gcc -O2`
 
 Peephole/DCE/local-ARC is a losing game against gcc. The real frontier is
-**high-level, semantic** transformations gcc cannot reconstruct from the lowered
-C, operating on the *typed* `.s.aif` before lowering:
-
-- **seq/string preallocation & builder fusion** — turn a `result.add(x)` loop
-  (which reallocs `O(log n)` times) into one `newSeq(n)`. gcc can't hoist or size
-  the alloc; this survives `-O2`.
-- **bounds/overflow-check elimination** via range invariants (`for i in 0 ..< s.len: s[i]`).
-- **cross-module ARC elision** and devirtualization with whole-program info.
-
-Own the passes incrementally onto an aowl core (dropping `$NIMONY_SRC`), paired
-with [aiflib](https://github.com/aoughwl/aiflib). That — not local peephole — is
-how "better than hexer" becomes true at `-O2`.
+**high-level, semantic** transformations gcc cannot reconstruct from lowered C,
+operating on the *typed* `.s.aif` before lowering — seq/string preallocation
+(`result.add` loop → one `newSeq`), bounds/overflow-check elimination via range
+invariants, cross-module ARC elision and devirtualization. That belongs in
+`aowlsem`, not here. This repo's own path forward is to own the lowering passes
+incrementally onto an aowl core (dropping the `$NIMONY_SRC` dependency).
 
 ## License
 
