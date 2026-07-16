@@ -212,22 +212,85 @@ function tryFold(k) {
   return null;
 }
 
+// 7. Move-aware destroy elision — the optimization gcc CANNOT do.
+// hexer's mover emits `=wasMoved(v)` when a value is moved out of `v`, but the
+// destroyer independently emits `=destroy(v)` at scope exit. When `=wasMoved(v)`
+// unconditionally dominates `=destroy(v)` in the same straight-line block and `v`
+// is not re-initialised in between, `v`'s payload is provably nil at the destroy,
+// so `=destroy(v)` is a runtime no-op (a call + null-check that always falls
+// through). gcc keeps it — `=destroy` is an opaque, side-effecting call and it
+// cannot prove `v` is nil across the opaque `=wasMoved`. We remove it. Sound: an
+// emptied owner has nothing to free, so eliding the destroy never leaks.
+function isArcCall(n, kind) {           // kind: "=wasMoved" | "=destroy"
+  return isList(n) && (n.tag === "call" || n.tag === "hcall") &&
+    isAtom(n.kids[0]) && n.kids[0].atom.startsWith(kind);
+}
+function argVar(call) {                  // var touched by an ARC call: v or (addr v)
+  const a = call.kids[1];
+  if (isList(a) && a.tag === "addr" && isAtom(a.kids[0])) return a.kids[0].atom;
+  if (isAtom(a)) return a.atom;
+  return null;
+}
+// Does statement `s` re-initialise / mutate variable `name` (making a later
+// destroy meaningful again)? Conservative: assignment/decl target, or address
+// taken by anything other than =destroy/=wasMoved.
+function mutates(s, name) {
+  let hit = false;
+  walk(s, (n) => {
+    if (isList(n)) {
+      if ((n.tag === "asgn" || n.tag === "store") && isAtom(n.kids[0]) && n.kids[0].atom === name) hit = true;
+      if (DECL_TAGS.has(n.tag) && isDefAtom(n.kids[0]) && n.kids[0].atom === name) hit = true;
+      // address taken inside a non-ARC statement → assume it may be mutated
+      if (n.tag === "addr" && isAtom(n.kids[0]) && n.kids[0].atom === name) hit = true;
+    }
+  });
+  return hit;
+}
+function moveDestroyElim(proc) {
+  let changed = false;
+  walk(proc, (node) => {
+    if (!(isList(node) && node.tag === "stmts")) return;
+    const ks = node.kids;
+    const moved = new Set();          // vars currently in a moved-from (nil) state
+    const keep = [];
+    for (let j = 0; j < ks.length; j++) {
+      const s = ks[j];
+      if (isArcCall(s, "=wasMoved")) { const v = argVar(s); if (v) moved.add(v); keep.push(s); continue; }
+      if (isArcCall(s, "=destroy")) {
+        const v = argVar(s);
+        if (v && moved.has(v)) { changed = true; continue; }   // elide: provably nil
+        keep.push(s); continue;
+      }
+      // any other statement: drop vars it mutates out of the moved-set
+      for (const v of [...moved]) if (mutates(s, v)) moved.delete(v);
+      keep.push(s);
+    }
+    node.kids = keep;
+  });
+  return changed;
+}
+
+// count ARC ops (for the metric)
+function countArc(root, kind) { let c = 0; walk(root, (n) => { if (isArcCall(n, kind)) c++; }); return c; }
+
 // ---- driver -------------------------------------------------------------
 function optimize(src) {
   const nodes = read(src);
   const root = nodes.find((n) => isList(n) && n.tag === "stmts");
   if (!root) throw new Error("aifopt: no top-level (stmts …)");
-  const before = { nodes: countNodes(root), rets: countTag(root, "ret"), vars: countTag(root, "var"),
-    labs: countTag(root, "lab"), stmts: countTag(root, "stmts") };
+  const snap = () => ({ nodes: countNodes(root), rets: countTag(root, "ret"), vars: countTag(root, "var"),
+    labs: countTag(root, "lab"), stmts: countTag(root, "stmts"), destroys: countArc(root, "=destroy") });
+  const before = snap();
 
   // fixpoint over all passes
   let pass = 0;
   for (;;) {
     let ch = false;
-    if (flattenStmts(root)) ch = true;
+    if (flattenStmts(root)) ch = true;         // flatten first: puts =wasMoved & =destroy in one block
     if (unreachableElim(root)) ch = true;
     // per-proc passes
     for (const p of root.kids) if (isList(p) && (p.tag === "proc" || p.tag === "func")) {
+      if (moveDestroyElim(p)) ch = true;       // the gcc-can't-do win
       if (deadVarElim(p)) ch = true;
       if (deadLabelElim(p)) ch = true;
     }
@@ -236,8 +299,7 @@ function optimize(src) {
     if (!ch || ++pass > 50) break;
   }
 
-  const after = { nodes: countNodes(root), rets: countTag(root, "ret"), vars: countTag(root, "var"),
-    labs: countTag(root, "lab"), stmts: countTag(root, "stmts") };
+  const after = snap();
   const out = "(.nif27)\n" + write(root) + "\n";
   return { out, before, after };
 }
@@ -261,7 +323,8 @@ if (require.main === module) {
     const pct = (a, b) => (a === 0 ? "0" : (((a - b) / a) * 100).toFixed(1));
     console.error(`aifopt: nodes ${r.before.nodes}→${r.after.nodes} (-${pct(r.before.nodes, r.after.nodes)}%)  ` +
       `stmts ${r.before.stmts}→${r.after.stmts}  rets ${r.before.rets}→${r.after.rets}  ` +
-      `vars ${r.before.vars}→${r.after.vars}  labs ${r.before.labs}→${r.after.labs}`);
+      `vars ${r.before.vars}→${r.after.vars}  labs ${r.before.labs}→${r.after.labs}  ` +
+      `=destroy ${r.before.destroys}→${r.after.destroys}`);
   }
   if (outp) fs.writeFileSync(outp, r.out); else process.stdout.write(r.out);
 }

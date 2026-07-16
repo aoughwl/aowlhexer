@@ -101,21 +101,54 @@ preserving. Passes: unreachable-code elimination, dead-variable elimination,
 dead-label elimination, `(stmts (stmts …))` flattening, integer constant folding,
 and algebraic identities (`x+0`, `x*1`, `x*0`, …), run to a fixpoint.
 
-Honest scope: for tiny integer programs `gcc -O2` would erase the *runtime*
-difference downstream — but the cleanup is backend-independent (it also shrinks
-the JS backend's input and the readable C), applies to un-optimized/debug builds,
-and is where hexer output quality is genuinely improved rather than deferred to
-the C compiler. It runs by default in the [aifmony](https://github.com/aoughwl/aifmony)
-pipeline (disable with `AIFMONY_NO_OPT=1`).
+There is also an **ARC pass**, `moveDestroyElim`: hexer's mover emits
+`=wasMoved(v)` when a value moves out of `v`, but the destroyer independently
+emits `=destroy(v)` at scope exit. Since `=wasMoved` sets `v.data := nil` and
+`=destroy` is `if v.data != nil: dealloc`, an `=destroy(v)` that a `=wasMoved(v)`
+unconditionally dominates is a provable no-op. aifopt removes it — soundly (an
+emptied owner has nothing to free). On a seq round-trip it cuts `=destroy` call
+sites 7 → 1.
 
-## Roadmap
+### Does this actually beat the stock pipeline? (measured — mostly no)
 
-Own it incrementally: rewrite passes onto an aowl-owned core (dropping the
-`$NIMONY_SRC` dependency), then retarget the shared infra to the aowl AIF
-libraries. Paired with [aiflib](https://github.com/aoughwl/aiflib) (the runtime
-ARC injects calls into), this removes the last nimony dependencies from native
-codegen. `aifopt` grows toward the wins gcc *cannot* do — eliding redundant ARC
-`=copy`/`=destroy` calls, which are opaque function calls to the C compiler.
+We tested honestly, by disassembly. **`gcc -O2` subsumes all of the above.** Dead
+code goes at any `-O`; the move/destroy ARC redundancy goes at `-O2`, because gcc
+inlines the small in-TU `=destroy`, const-propagates the `nil` from the inlined
+`=wasMoved`, and elides the call:
+
+| opt level | `=destroy` calls left in the round-trip proc |
+|---|---|
+| `-O0` / `-O1` | **2** (gcc keeps the redundant one) |
+| `-O2` / `-O3` | **0** (gcc does the elision itself) |
+
+This is almost certainly **why Araq leaves it**: hexer/lengc emit canonical,
+simple C and defer local cleanup to a world-class C optimizer — and lengc's own
+output carries the identical dead code. So aifopt's honest value is narrower than
+"beats hexer":
+
+- **`-O0`/`-O1` debug builds** — real: fewer instructions, faster debug builds.
+- **cross-TU ARC** — when a type's `=destroy` is *not* inlined (large body or a
+  different module without LTO), gcc keeps the redundant call and aifopt removes it.
+- **backend-independent** — it shrinks the JS backend's input and the readable C.
+
+It runs by default in [aifmony](https://github.com/aoughwl/aifmony)
+(`AIFMONY_NO_OPT=1` disables).
+
+## Roadmap — where a Nim-level optimizer genuinely beats `gcc -O2`
+
+Peephole/DCE/local-ARC is a losing game against gcc. The real frontier is
+**high-level, semantic** transformations gcc cannot reconstruct from the lowered
+C, operating on the *typed* `.s.aif` before lowering:
+
+- **seq/string preallocation & builder fusion** — turn a `result.add(x)` loop
+  (which reallocs `O(log n)` times) into one `newSeq(n)`. gcc can't hoist or size
+  the alloc; this survives `-O2`.
+- **bounds/overflow-check elimination** via range invariants (`for i in 0 ..< s.len: s[i]`).
+- **cross-module ARC elision** and devirtualization with whole-program info.
+
+Own the passes incrementally onto an aowl core (dropping `$NIMONY_SRC`), paired
+with [aiflib](https://github.com/aoughwl/aiflib). That — not local peephole — is
+how "better than hexer" becomes true at `-O2`.
 
 ## License
 
