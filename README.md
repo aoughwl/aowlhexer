@@ -62,13 +62,60 @@ Built from Araq's passes, `aifhexer` produces the same `.c.aif` as nimony's
 results (`fib(20)=6765`, `ack(3,4)=125`, `fib(25)=75025`). It is the lowering
 stage in aifmony's default pipeline today.
 
+## Better than stock hexer — the optimization layer (`opt/aifopt.js`)
+
+Stock hexer/lengc lowers *correctly* but leaves measurable slack in the `.c.aif`:
+**every** proc it emits carries an unreachable trailing `return result`, the dead
+`result` variable behind it, and a dead loop label — plus deeply nested
+single-child `(stmts (stmts …))` blocks and un-folded constant arithmetic.
+`aifopt` is the fixpoint simplifier a stock pipeline omits. It removes all of it
+and re-emits a valid `.c.aif`.
+
+Concretely, the `gcd` proc — **before** (stock hexer → C) and **after** (+aifopt):
+
+```c
+NI64 gcd(NI64 a, NI64 b) {          NI64 gcd(NI64 a, NI64 b) {
+  NI64 result_0;         // dead      NI64 x = a;
+  NI64 x = a;                         NI64 y = b;
+  NI64 y = b;                         { while (!(y == 0)) {
+  { while (!(y == 0)) {                   NI64 t = y; y = x % y; x = t;
+      NI64 t = y; y = x % y; x = t;   } }
+  } }                                 return x;
+  whileStmtLabel_0: ;    // dead    }
+  return x;
+  return result_0;       // unreachable
+}
+```
+
+Measured on real hexer output (`node opt/demo.js`):
+
+| file | IR nodes | dead rets | dead vars | dead labels |
+|---|---|---|---|---|
+| compute | 486 → 444 (−8.6%) | 12 → 8 | 12 → 8 | 4 → 0 |
+| fib | 254 → 241 (−5.1%) | 7 → 5 | 6 → 5 | 1 → 0 |
+| mathf | 330 → 317 (−3.9%) | 12 → 10 | 5 → 4 | 1 → 0 |
+| **total** | **1070 → 1002 (−6.4%)** | **31 → 23** | **23 → 17** | **6 → 0** |
+
+**8/8** optimized programs return identical results — the cleanup is behaviour-
+preserving. Passes: unreachable-code elimination, dead-variable elimination,
+dead-label elimination, `(stmts (stmts …))` flattening, integer constant folding,
+and algebraic identities (`x+0`, `x*1`, `x*0`, …), run to a fixpoint.
+
+Honest scope: for tiny integer programs `gcc -O2` would erase the *runtime*
+difference downstream — but the cleanup is backend-independent (it also shrinks
+the JS backend's input and the readable C), applies to un-optimized/debug builds,
+and is where hexer output quality is genuinely improved rather than deferred to
+the C compiler. It runs by default in the [aifmony](https://github.com/aoughwl/aifmony)
+pipeline (disable with `AIFMONY_NO_OPT=1`).
+
 ## Roadmap
 
 Own it incrementally: rewrite passes onto an aowl-owned core (dropping the
 `$NIMONY_SRC` dependency), then retarget the shared infra to the aowl AIF
 libraries. Paired with [aiflib](https://github.com/aoughwl/aiflib) (the runtime
 ARC injects calls into), this removes the last nimony dependencies from native
-codegen.
+codegen. `aifopt` grows toward the wins gcc *cannot* do — eliding redundant ARC
+`=copy`/`=destroy` calls, which are opaque function calls to the C compiler.
 
 ## License
 
