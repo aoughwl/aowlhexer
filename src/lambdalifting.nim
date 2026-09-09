@@ -689,7 +689,19 @@ proc treProcType(c: var Context; dest: var TokenBuf; n: var Cursor) =
         if n.kind == ParRi: break
         tre c, dest, n
     else:
+      # `proctype` is not the only routine TYPE with the short layout. A
+      # `.passive` `itertype` reaches here too (`.closure` ones were taken by
+      # `itertypeNeedsTuple` above) and has exactly the same four sons:
+      # nilability, params, retType, pragmas. Only a routine DECLARATION has
+      # `BodyPos` sons, and a declaration is what this branch exists for.
+      # Without the `)` guard the four-son type ran the walk off its own end
+      # into the enclosing tree and `tre` died on `bug "unexpected ')' inside"`
+      # -- but only in a module that ALSO has a closure iter, because a module
+      # with no closures never enters this walk at all, which is why the shape
+      # survived unnoticed. A declaration never sees `)` early, so the guard
+      # costs it nothing.
       for i in 0..<BodyPos:
+        if n.kind == ParRi: break
         tre c, dest, n
       if n.hasMore:
         dest.takeTree n # don't transform the potential proc body here
