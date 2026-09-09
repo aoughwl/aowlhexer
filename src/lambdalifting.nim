@@ -972,7 +972,17 @@ proc genCall(c: var Context; dest: var TokenBuf; n: var Cursor) =
           var t = typ
           tre c, dest, t
           tre c, dest, n # value
-      dest.addSymUse tmp, info
+      # The callee slot takes the FUNCTION half of the closure pair, not the
+      # pair. The `n.kind == Symbol` branch above spells that `(tupat sym 0)`;
+      # this branch (a non-symbol callee -- `h.cb(1)`, an object field holding a
+      # closure) hoisted the pair into `llTemp` and then handed `llTemp` itself
+      # to `(call ...)`, so the call's function operand had tuple type while its
+      # trailing env argument was correctly `(tupat llTemp 1)`. Nothing further
+      # down the pipeline can repair that: eraiser is the first pass to ask for
+      # the callee's params and dies on `fnType.tagEnum == ParamsTagId`.
+      dest.copyIntoKind TupatX, info:
+        dest.addSymUse tmp, info
+        dest.addIntLit 0, info
       dest.addParRi() # ExprX
   else:
     dest.add callNode
