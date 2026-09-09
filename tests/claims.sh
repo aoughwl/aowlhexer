@@ -12,8 +12,9 @@
 #
 # It is RED today and should be. README's "Verified" section states
 # `fib(20)=6765`, `ack(3,4)=125`, `fib(25)=75025` as a property of the pipeline,
-# and neither gate here ever runs a produced binary — both stop at the byte
-# comparison of the lowering. A number whose producer does not exist is the
+# and no gate here prints them. tests/raises.sh runs a produced binary, but only
+# to check its own regression case's stdout; differential.sh and game.sh stop at
+# the byte comparison of the lowering. A number whose producer does not exist is the
 # exact shape of the defect this file exists to catch, so it fails until someone
 # writes the script or restates the claim as aifmony's, naming aifmony's command.
 #

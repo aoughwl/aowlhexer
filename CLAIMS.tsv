@@ -12,15 +12,18 @@
 #
 # This repo's exposure is the "Verified" section. `fib(20)=6765`,
 # `ack(3,4)=125`, `fib(25)=75025` are stated as a property of the pipeline, and
-# NEITHER gate here runs a produced binary: differential.sh and game.sh both stop
-# at byte-comparing the lowered .c.aif. There is no script in this tree that
-# would print those three numbers. That is the 498/498 shape exactly -- a true-
+# no gate here prints them. tests/raises.sh does now compile and RUN a produced
+# binary -- so the old wording, "NEITHER gate here runs a produced binary", is
+# no longer true and has been corrected -- but it runs ONE regression case and
+# checks ITS output; it computes no fib and no ack. differential.sh and game.sh
+# still stop at byte-comparing the lowered .c.aif. There is still no script in
+# this tree that would print those three numbers. That is the 498/498 shape exactly -- a true-
 # sounding number whose producer does not exist -- so it is filed UNATTRIBUTED
 # and fails the run until somebody either writes the script or restates the
 # claim as aifmony's, naming aifmony's command.
 #
 # Columns: FILE <TAB> ANCHOR <TAB> CLASS <TAB> NUMBER <TAB> SOURCE <TAB> EXTRACT <TAB> GUARD
 README.md	The 25 lowering passes under `src/`	GATE	25	ls src/*.nim | wc -l	^\s*(\d+)\s*$
-README.md	(`fib(20)=6765`, `ack(3,4)=125`, `fib(25)=75025`)	UNATTRIBUTED	6765	neither gate in this repo ever RUNS a produced binary. tests/differential.sh and tests/game.sh both stop at byte-comparing the lowered .c.aif/.dce.nif against nimony's hexer; grep for 'fib' or 'ack' across every *.sh here returns nothing. The claim needs the aifmony pipeline end to end (.nim -> nifparser -> sem -> aowlhexer -> aowlc -> gcc) plus running the binary, and nothing here does that. Either add a script that does it and paste what it printed, or state the claim as 'aifmony's driver reports' with the aifmony command that reports it.
+README.md	(`fib(20)=6765`, `ack(3,4)=125`, `fib(25)=75025`)	UNATTRIBUTED	6765	no gate in this repo produces these numbers. tests/raises.sh does run a produced binary, but only for its own regression case's stdout; tests/differential.sh and tests/game.sh stop at byte-comparing the lowered .c.aif/.dce.nif against nimony's hexer. grep for 'fib' or 'ack' across every *.sh here still returns nothing. The claim needs the aifmony pipeline end to end (.nim -> nifparser -> sem -> aowlhexer -> aowlc -> gcc) plus running the binary, and nothing here does that. Either add a script that does it and paste what it printed, or state the claim as 'aifmony's driver reports' with the aifmony command that reports it.
 README.md	2 redundant `=destroy` calls at `-O0`/`-O1` → 0 at `-O2`	UNATTRIBUTED	2	read off a disassembly by hand. The aifopt pass it describes was REMOVED, so nothing in the tree can reproduce it; there is no objdump harness in tests/. Keep it as a dated engineering note naming the binary and the objdump invocation, or drop the count.
 README.md	the resulting native binaries return correct	EXPENSIVE	binaries	bash tests/differential.sh --compare-only	^(\d+/\d+) lowerings identical	NIMONY_SRC|no such|not found
