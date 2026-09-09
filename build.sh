@@ -9,7 +9,10 @@
 # resolve to our copies consistently.
 set -e
 NIMONY_SRC="${NIMONY_SRC:-$HOME/nimony/src}"
-NIM="${NIM:-$HOME/Nim/bin/nim}"
+# A `nim` on PATH is the normal case (choosenim, a distro package); the
+# hard-coded checkout is the fallback, not the other way round. With the order
+# reversed, `./build.sh` died on any machine that installs Nim the usual way.
+NIM="${NIM:-$(command -v nim || echo "$HOME/Nim/bin/nim")}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD="$ROOT/.build"
 [ -d "$NIMONY_SRC" ] || { echo "aowlhexer: NIMONY_SRC not found: $NIMONY_SRC" >&2; exit 1; }
