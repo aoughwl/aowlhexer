@@ -338,6 +338,37 @@ proc tr(c: var Context; dest: var TokenBuf; n: var Cursor) =
 
 proc isClosure(typ: Cursor): bool {.inline.} = procHasPragma(typ, ClosureP)
 
+proc mentionsClosureRoutineType(n: Cursor): bool =
+  ## True when this subtree declares a `.closure` routine TYPE somewhere --
+  ## the only reason a type DECLARATION needs pass-2 lowering at all.
+  ## An already-lifted `(tuple (proctype ...) (ref RootObj))` does not count:
+  ## recursing into one would re-wrap its inner proctype (see
+  ## `isLiftedClosureTuple`).
+  var n = n
+  var nested = 0
+  while true:
+    case n.kind
+    of ParLe:
+      if isLiftedClosureTuple(n):
+        skip n
+        if nested == 0: break
+      elif n.typeKind in RoutineTypes and (isClosure(n) or itertypeNeedsTuple(n)):
+        return true
+      else:
+        inc nested
+        inc n
+    of ParRi:
+      dec nested
+      inc n
+      if nested <= 0: break
+    of EofToken:
+      break
+    else:
+      inc n
+      if nested == 0: break
+  result = false
+
+
 when false:
   proc paramsWithClosurePragma(typ: Cursor): bool =
     var typ = typ
@@ -1062,6 +1093,46 @@ proc treToClosure(c: var Context; dest: var TokenBuf; n: var Cursor) =
     dest.addParPair NilX, info
   skipParRi n
 
+proc treTypeDecl(c: var Context; dest: var TokenBuf; n: var Cursor) =
+  ## A type DECLARATION was taken verbatim by pass 2, but pass 2 is exactly the
+  ## pass that rewrites a `.closure` routine type to its `(fn, env)` tuple. So a
+  ## closure proc reached through a type declaration -- an object field, a tuple
+  ## field, a plain alias -- kept the bare proctype while every USE of it became
+  ## the two-word tuple:
+  ##
+  ##   type Holder = object
+  ##     cb: proc (x: int): int {.closure.}
+  ##   var h = Holder(cb: proc (x: int): int {.closure.} = x * k)
+  ##   echo h.cb(4)
+  ##
+  ## emitted `Holder.cb` as a plain `NI64 (*)(NI64)` and then initialised that
+  ## field from the tuple, so the generated C did not compile:
+  ##   error: incompatible types when initializing type 'NI64 (*)(NI64)'
+  ##          using type '<closure tuple>'
+  ## A LOCAL of the very same type was always lowered (`treLocal` -> `treType`),
+  ## which is why only the field/alias spelling was broken and a closure held in
+  ## a `var` never showed it.
+  ##
+  ## Declarations that mention no closure routine type are still taken verbatim,
+  ## so this cannot perturb the emitted tree for any module it does not concern.
+  if not mentionsClosureRoutineType(n):
+    takeTree dest, n
+    return
+  let typeStart = dest.len
+  var typeSym = SymId(0)
+  dest.takeToken n              # `type` tag
+  if n.kind == SymbolDef: typeSym = n.symId
+  for i in 0..3: takeTree dest, n   # name, exported, typevars, pragmas
+  if n.hasMore:
+    treType c, dest, n          # the body -- the part that needs lowering
+  while n.hasMore: takeTree dest, n
+  dest.takeParRi n
+  if typeSym != SymId(0):
+    # Downstream (lifter, lengcgen) resolves the field types through the symbol
+    # table, not through this buffer, so the rewritten shape has to be published
+    # or they would still see the un-lowered proctype.
+    programs.publish(typeSym, dest, typeStart)
+
 proc tre(c: var Context; dest: var TokenBuf; n: var Cursor) =
   case n.kind
   of Symbol:
@@ -1171,7 +1242,9 @@ proc tre(c: var Context; dest: var TokenBuf; n: var Cursor) =
         transformClosureIter c, dest, n
       else:
         takeTree dest, n
-    of MacroS, TemplateS, TypeS, EmitS, BreakS, ContinueS,
+    of TypeS:
+      treTypeDecl c, dest, n
+    of MacroS, TemplateS, EmitS, BreakS, ContinueS,
       ForS, IncludeS, ImportS, FromimportS, ImportexceptS,
       ExportS, CommentS,
       PragmasS:
