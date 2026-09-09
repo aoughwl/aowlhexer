@@ -1119,7 +1119,20 @@ proc tre(c: var Context; dest: var TokenBuf; n: var Cursor) =
           c.toProcType(dest, origTyp)
           dest.addRootRef info
         dest.addSymUse n.symId, info
-        dest.untypedEnv info, c.env
+        if c.env.s == SymId(0):
+          # A `.closure` lambda that captures NOTHING has no environment: pass 1
+          # never created one, so `c.env` is empty by the time the escaping
+          # reference is rewritten into the (fn, env) pair. The pair still needs
+          # its second son -- a null env, exactly what `trNil` writes for a nil
+          # closure. Asserting an env exists instead (via `untypedEnv`) made
+          # EVERY non-capturing `{.closure.}` lambda abort the compiler:
+          #   let f = proc (x: int): int {.closure.} = x + 1
+          #   echo f(2)     # AssertionDefect: env.s != SymId(0)
+          # A capturing lambda has an env and never reached the assert, which is
+          # why the simpler of the two shapes was the broken one.
+          dest.addParPair NilX, info
+        else:
+          dest.untypedEnv info, c.env
       inc n
     else:
       let repWith = c.localToEnv.getOrDefault(n.symId)
