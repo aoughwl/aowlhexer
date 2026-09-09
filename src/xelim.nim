@@ -128,7 +128,8 @@ proc trExprInto(c: var Context; dest: var TokenBuf; n: var Cursor; v: SymId) =
       dest.addSymUse v, info
       dest.addTarget tar
 
-proc hoistDeclsFromExprX(outerDest, transformed: var TokenBuf; n: var Cursor;
+proc hoistDeclsFromExprX(typeCache: var TypeCache;
+                         outerDest, transformed: var TokenBuf; n: var Cursor;
                          markNoinit = false) =
   ## Copy the subtree at `n` into `transformed`. If the subtree is an
   ## `(expr (stmts decls…) val…)`, top-level `let`/`var`/`cursor` decls
@@ -145,6 +146,20 @@ proc hoistDeclsFromExprX(outerDest, transformed: var TokenBuf; n: var Cursor;
   ## cannot see that correlation through the hoist, so the tag tells it to treat
   ## the slot as initialised — used only on the Final-IR (analysis) path, so
   ## codegen still gets the plain zero-initialised slot.
+  ##
+  ## Every decl seen here is registered in `typeCache`, hoisted or not. A hoisted
+  ## one has been MOVED out of the subtree `transformed` hands back, so nothing
+  ## in that subtree declares it any more and `typenav.getTypeImpl`'s
+  ## `registerLocals` walk cannot see it; `getType` on the operand then dies with
+  ## "could not find symbol". A decl whose initialiser is a call is not hoisted
+  ## at all — see the note at that branch — but it is still registered, because
+  ## the caller reads the operand out of a standalone buffer whose enclosing
+  ## scopes were never walked.
+  ##
+  ## Both halves are what `{.raises.}` on the right of `or`/`and` needs: eraiser
+  ## turns such a call into `(expr (stmts (cursor :`canRaise.N … (call …))
+  ## (if (failed `canRaise.N) …)) `canRaise.N)`, a decl-plus-use pair this hoist
+  ## used to split.
   if n.kind != ParLe or n.exprKind != ExprX:
     transformed.takeTree n
     return
@@ -158,10 +173,28 @@ proc hoistDeclsFromExprX(outerDest, transformed: var TokenBuf; n: var Cursor;
       if n.kind != ParLe or n.stmtKind notin {LetS, VarS, CursorS}:
         transformed.takeTree n
         continue
+      let declKind = n.stmtKind
       let info = n.info
-      let local = takeLocal(n, SkipFinalParRi)
+      var probe = n
+      let local = takeLocal(probe, SkipFinalParRi)
       let sym = local.name.symId
       let symInfo = local.name.info
+      if local.val.exprKind in CallKinds:
+        # A decl whose initialiser is a CALL stays where it is. Later passes
+        # pattern-match the whole `(let/cursor :sym … (call …))` shape:
+        # `constparams` rewrites a `{.raises.}` call into its error/value tuple
+        # only where it can see the decl (or the `asgn`) the call feeds.
+        # Splitting it into `(var :sym … .)` + `(asgn sym (call …))` lets
+        # xelim's own statement lowering interpose a temp first, after which
+        # the tuple rewrite lands on the temp and the decl is assigned a bare
+        # `bool` — a C type error at the very end of the pipeline, not a Nim
+        # one. Nothing needs such a decl hoisted anyway: every use of it lives
+        # inside the operand's own stmt-list.
+        typeCache.registerLocal(sym, cast[SymKind](declKind), local.typ, local.val)
+        transformed.takeTree n
+        continue
+      n = probe
+      typeCache.registerLocal(sym, cast[SymKind](declKind), local.typ)
       outerDest.addParLe(VarS, info)
       outerDest.add symdefToken(sym, symInfo)
       outerDest.addSubtree local.exported
@@ -202,7 +235,7 @@ proc trOr(c: var Context; dest: var TokenBuf; n: var Cursor; tar: var Target) =
     # scope so they remain visible after the `or` lowering — same idea as
     # `trAnd` below; see the comment there.
     var rhs = createTokenBuf(16)
-    hoistDeclsFromExprX(dest, rhs, n, markNoinit = c.goal == TowardsFinalIr)
+    hoistDeclsFromExprX(c.typeCache, dest, rhs, n, markNoinit = c.goal == TowardsFinalIr)
     var rhsCursor = beginRead(rhs)
     copyIntoKind dest, IfS, info:
       copyIntoKind dest, ElifU, info:
@@ -236,7 +269,7 @@ proc trAnd(c: var Context; dest: var TokenBuf; n: var Cursor; tar: var Target) =
     # and the original initialiser is rewritten into an `asgn` that runs
     # only when `x` is true (preserving short-circuit evaluation).
     var rhs = createTokenBuf(16)
-    hoistDeclsFromExprX(dest, rhs, n, markNoinit = c.goal == TowardsFinalIr)
+    hoistDeclsFromExprX(c.typeCache, dest, rhs, n, markNoinit = c.goal == TowardsFinalIr)
     var rhsCursor = beginRead(rhs)
     copyIntoKind dest, IfS, info:
       copyIntoKind dest, ElifU, info:

@@ -3,3 +3,4 @@ bin/
 *.log
 .difftest/
 .difftest-game/
+.raisestest/
