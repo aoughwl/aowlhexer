@@ -874,12 +874,44 @@ proc treProcBody(c: var Context; dest, init: var TokenBuf; n: var Cursor; sym: S
   else:
     tre(c, dest, n)
 
+proc signatureMentionsClosure(decl: Cursor): bool =
+  ## Does this routine's PARAMS or RETURN TYPE mention a `.closure` routine
+  ## type? Those are exactly the signatures whose shape pass 2 rewrites.
+  var n = decl
+  if n.kind != ParLe: return false
+  inc n
+  for i in 0..<ParamsPos: skip n
+  if mentionsClosureRoutineType(n): return true
+  skip n
+  result = mentionsClosureRoutineType(n)
+
 proc treProc(c: var Context; dest: var TokenBuf; n: var Cursor) =
   var init = createTokenBuf(10)
   let decl = n
+  # Pass 2 rewrites a `.closure` routine type in a signature to its `(fn, env)`
+  # tuple, but it never told the symbol table. Every LATER pass resolves a
+  # routine through `tryLoadSym`, so they all kept reading the PRE-lowering
+  # signature, and a temp typed from it got the bare proctype while the callee
+  # it was initialised from returned the tuple:
+  #
+  #   var fs: seq[proc (x: int): int {.closure.}] = @[]
+  #   fs.add proc (x: int): int {.closure.} = x + 1
+  #   echo fs[0](2)
+  #
+  # Here `seq.[]` is instantiated at the closure type, so its return type
+  # genuinely changes shape. xelim hoisted the `fs[0]` result into a temp whose
+  # declared type it read from the stale signature, and the C did not compile:
+  #   error: initialization of 'NI64 (**)(NI64)' from incompatible pointer type
+  # Republishing keeps the two in step. Only signatures that actually mention a
+  # closure routine type are republished, so this cannot disturb any routine
+  # whose shape pass 2 leaves alone.
+  let republishSig = signatureMentionsClosure(decl)
+  let declStart = dest.len
+  var procSym = SymId(0)
   copyInto dest, n:
     var isConcrete = true # assume it is concrete
     let sym = n.symId
+    procSym = sym
     c.procStack.add(sym)
     let closureOwner = c.procStack[0]
     let needsHeap = c.escapes.contains(closureOwner)
@@ -895,6 +927,16 @@ proc treProc(c: var Context; dest: var TokenBuf; n: var Cursor) =
           treType c, dest, n
         else:
           takeTree dest, n
+
+    if republishSig and procSym != SymId(0):
+      # Everything up to (not including) the body is the signature. Mirrors
+      # `programs.publishSignature`, which cannot be used directly because it
+      # publishes to the END of `dest` and the body has not been written yet.
+      var sigBuf = createTokenBuf(dest.len - declStart + 3)
+      for i in declStart..<dest.len: sigBuf.add dest[i]
+      sigBuf.addDotToken() # body is empty for a signature
+      sigBuf.addParRi()
+      programs.publish(procSym, sigBuf, SemcheckSignatures)
 
     if isConcrete:
       treProcBody(c, dest, init, n, sym, needsHeap)
