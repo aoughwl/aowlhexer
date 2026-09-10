@@ -1,0 +1,5 @@
+obj let  keep=stone a=stone
+obj var  kept=wood b=wood
+string   ks=ore s=oreore
+after    keep=stone a=iron
+nocopy   c=clay

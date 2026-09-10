@@ -286,6 +286,24 @@ proc singlePath(pc: Cursor; nested: int; x: Cursor; pcs: var seq[Cursor];
         of AsgnS:
           inc pc
           if (pc.kind == Symbol and pc.symId == root) or sameTrees(pc, x):
+            # A store *to* the moved-from location. The store kills the old
+            # value, but only after its right-hand side has been evaluated —
+            # and the right-hand side may read that very location:
+            #
+            #   let keep = a      # <- `x` here; is this the last read of `a`?
+            #   a = pick(a)       # (asgn a (call pick a))
+            #
+            # Looking only at the left-hand side says "redefined, so the old
+            # value is dead" and sinks the earlier read into a move, which
+            # emits `=wasMoved(a)` *before* the call — so `pick` receives a
+            # zeroed argument and takes the empty branch. Scan the right-hand
+            # side first: a read of the root there is a genuine later use.
+            var rhs = pc
+            skip rhs # step over the left-hand side, landing on the value
+            let usageAt = rhs
+            if containsRoot(rhs, x):
+              otherUsage = usageAt
+              return false
             # the path leads to a redefinition of 's' --> sink 's'.
             break
           skip pc # skip left-hand-side
