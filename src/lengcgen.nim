@@ -1121,7 +1121,11 @@ proc genStringLit(c: var EContext; dest: var TokenBuf; s: string; info: PackedLi
       # `strLits` keeps emission to one const per distinct string per module.
       var litName = c.strLits.getOrDefault(s)
       if litName == SymId(0):
-        litName = pool.syms.getOrIncl("strlit.0.I" & $uint64(hash(s)) & "." & c.main)
+        # `hash(s)` reads `s` as a C string: "undefined" and "NUL+undefined" hash alike,
+        # and two different consts under one name is a C redefinition. A string
+        # holding a NUL gets its length in the name too (every other name unchanged).
+        let nulTag = if chr(0) in s: "z" & $s.len else: ""
+        litName = pool.syms.getOrIncl("strlit.0.I" & $uint64(hash(s)) & nulTag & "." & c.main)
         c.strLits[s] = litName
 
         c.strLitBuf.add tagToken("const", info)

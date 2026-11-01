@@ -246,6 +246,9 @@ proc isTrivial*(c: var LiftingCtx; typ: TypeCursor): bool =
     result = true # lent types are borrowed; no hooks needed
   of SinkT, ArrayT:
     result = isTrivial(c, typ.firstSon)
+  of DistinctT:
+    # an INLINE `(distinct T)` (not behind a symbol) is as trivial as its base
+    result = isTrivial(c, typ.firstSon)
   of ObjectT:
     result = isTrivialObjectBody(c, typ)
   of TupleT:
@@ -257,7 +260,7 @@ proc isTrivial*(c: var LiftingCtx; typ: TypeCursor): bool =
         return false
       skip tup
     result = true
-  of NoType, ErrT, NiltT, OrT, AndT, NotT, ConceptT, DistinctT, StaticT, InvokeT,
+  of NoType, ErrT, NiltT, OrT, AndT, NotT, ConceptT, StaticT, InvokeT,
      TypekindT, UntypedT, TypedT:
     echo "isTrivial: ", toString(typ, false)
     bug "bug in isTrival computation"
