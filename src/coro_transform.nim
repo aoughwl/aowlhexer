@@ -38,7 +38,8 @@ when defined(nimony):
 include ".." / lib / nifprelude
 include ".." / lib / compat2
 import ".." / lib / symparser
-import ".." / nimony / [nimony_model, decls, programs, typenav, sizeof, expreval, xints, builtintypes, langmodes, renderer, reporters, typeprops]
+import ".." / nimony / [nimony_model, decls, programs, typenav, expreval, xints, builtintypes, langmodes, renderer, reporters, typeprops]
+import hsizeof
 import ".." / njvl / [nj, njvl_model]
 import passes
 include ".." / nimony / nif_annotations

@@ -41,7 +41,8 @@ import std / [assertions, sets, tables, hashes, syncio]
 include ".." / lib / nifprelude
 include ".." / lib / compat2
 import ".." / lib / symparser
-import ".." / nimony / [nimony_model, decls, programs, typenav, sizeof, expreval, xints, builtintypes, langmodes, renderer, reporters, typeprops]
+import ".." / nimony / [nimony_model, decls, programs, typenav, expreval, xints, builtintypes, langmodes, renderer, reporters, typeprops]
+import hsizeof
 import hexer_context, passes
 include ".." / nimony / nif_annotations
 import coro_transform

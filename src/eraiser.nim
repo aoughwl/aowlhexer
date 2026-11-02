@@ -35,7 +35,8 @@ import std / [sets, tables, hashes, assertions, syncio]
 
 include ".." / lib / nifprelude
 include ".." / lib / compat2
-import ".." / nimony / [nimony_model, decls, programs, typenav, sizeof, typeprops]
+import ".." / nimony / [nimony_model, decls, programs, typenav, typeprops]
+import hsizeof
 import ".." / models / tags
 import duplifier, passes
 include ".." / nimony / nif_annotations

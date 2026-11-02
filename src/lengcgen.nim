@@ -17,7 +17,8 @@ include ".." / lib / nifprelude
 include ".." / lib / compat2
 import ".." / lib / symparser
 import ".." / models / tags
-import ".." / nimony / [nimony_model, programs, typenav, expreval, xints, decls, builtintypes, sizeof, typeprops, langmodes, typekeys, nifconfig]
+import ".." / nimony / [nimony_model, programs, typenav, expreval, xints, decls, builtintypes, typeprops, langmodes, typekeys, nifconfig]
+import hsizeof
 import hexer_context, pipeline, dce1, lifter
 import  ".." / lib / [stringtrees]
 
@@ -751,6 +752,10 @@ proc parsePragmas(c: var EContext; dest: var TokenBuf; n: var Cursor): Collected
             if hookKind(n.tagId) != NoHook:
               skip n
             elif isNilAnnotation(n):
+              skip n
+            elif pool.tags[n.tagId] == "ensuresNif":
+              # tooling-only contract annotation (`template ensuresNif*(x) {.pragma.}`);
+              # it has no meaning below the front end, so a front end that keeps it is tolerated
               skip n
             else:
               error c, "unknown pragma: ", n

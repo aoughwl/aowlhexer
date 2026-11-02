@@ -21,7 +21,8 @@ import std / [tables, hashes, sets, assertions, syncio]
 include ".." / lib / nifprelude
 include ".." / lib / compat2
 import ".." / lib / symparser
-import ".." / nimony / [nimony_model, decls, programs, typenav, sizeof]
+import ".." / nimony / [nimony_model, decls, programs, typenav]
+import hsizeof
 import duplifier
 
 type

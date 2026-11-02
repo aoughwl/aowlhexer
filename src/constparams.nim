@@ -22,7 +22,8 @@ We also now do part of the exception handling transformations here:
 import std / [sets, tables, hashes, assertions, syncio]
 include ".." / lib / nifprelude
 include ".." / lib / compat2
-import ".." / nimony / [nimony_model, decls, programs, typenav, sizeof, typeprops, builtintypes]
+import ".." / nimony / [nimony_model, decls, programs, typenav, typeprops, builtintypes]
+import hsizeof
 import ".." / models / tags
 import duplifier, eraiser, passes
 include ".." / nimony / nif_annotations
@@ -46,8 +47,17 @@ when not defined(nimony):
   proc tr(c: var Context; dest: var TokenBuf; n: var Cursor)
     {.ensuresNif: addedAny(dest).}
 
+proc namesAType(typ: Cursor): bool =
+  ## A parameter type that is a symbol must be a type declaration. A front end
+  ## can leave a symbol here that is not one (a generic parameter that was never
+  ## instantiated); its layout is unknown, so it is never passed by const ref.
+  if typ.kind != Symbol: return true
+  let s = tryLoadSym(typ.symId)
+  result = s.status == LacksNothing and s.decl.stmtKind == TypeS
+
 proc passByConstRef(c: var Context; typ, pragmas: Cursor): bool =
-  result = sizeof.passByConstRef(typ, pragmas, c.ptrSize, c.sizeofCache) or
+  if not namesAType(typ): return false
+  result = hsizeof.passByConstRef(typ, pragmas, c.ptrSize, c.sizeofCache) or
            typeprops.isInheritable(typ, false)
 
 proc rememberConstRefParams(c: var Context; params: Cursor) =

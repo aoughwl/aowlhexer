@@ -16,7 +16,8 @@ when defined(nimony):
 include ".." / lib / nifprelude
 include ".." / lib / compat2
 import lifter
-import ".." / nimony / [nimony_model, typenav, langmodes, sizeof]
+import ".." / nimony / [nimony_model, typenav, langmodes]
+import hsizeof
 
 export RcField, DataField
 

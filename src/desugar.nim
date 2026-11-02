@@ -9,7 +9,8 @@ import std / [assertions, tables, hashes, sets, syncio]
 from std / strutils import startsWith
 include ".." / lib / nifprelude
 include ".." / lib / compat2
-import ".." / nimony / [nimony_model, decls, programs, typenav, sizeof, expreval, xints, builtintypes, langmodes, renderer, reporters]
+import ".." / nimony / [nimony_model, decls, programs, typenav, expreval, xints, builtintypes, langmodes, renderer, reporters]
+import hsizeof
 import hexer_context, passes
 include ".." / nimony / nif_annotations
 
