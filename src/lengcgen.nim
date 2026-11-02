@@ -2530,7 +2530,27 @@ proc trToplevel(c: var EContext; dest: var TokenBuf; n: var Cursor) =
   inc n
   while n.hasMore:
     let sk = n.stmtKind
-    if sk in {GvarS, GletS, TvarS, TletS}:
+    # A top-level `const` whose value is built at run time (`const R = [B(xs: @["a"])]`:
+    # the `@[...]` is a call, so xelim hoists a temp for it into the init body) cannot
+    # stay a C-level constant: its value names those temps, which only exist inside the
+    # init proc. It is lowered exactly like a global with a call initializer: a bare
+    # declaration at the top and the assignment in the init body, after the temps.
+    if sk == ConstS and initHasCall(c, n):
+      let savedN = n
+      trLocal c, dest, n, GvarY, TraverseSig
+      var initN = savedN
+      inc initN
+      let (initSym, initInfo) = getSymDef(c, initN)
+      skipExportMarker c, initN
+      skip initN
+      skip initN
+      swap dest, c.initBody
+      dest.addParLe AsgnS, initInfo
+      dest.add symToken(initSym, initInfo)
+      trExpr c, dest, initN
+      dest.addParRi()
+      swap dest, c.initBody
+    elif sk in {GvarS, GletS, TvarS, TletS}:
       let tag = if sk in {TvarS, TletS}: TvarY else: GvarY
       if not initHasCall(c, n):
         # Simple init (literal, nil, etc.): keep at top level.
