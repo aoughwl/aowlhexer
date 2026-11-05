@@ -1830,7 +1830,11 @@ proc transformCoroutineDecl*(c: var Context; dest: var TokenBuf; n: var Cursor) 
   let kind =
     if n.stmtKind == IteratorS: IteratorY
     else: NoSym
-  var currentProc = ProcContext(kind: IsNormal)
+  # `labelCounter` is spelled out although its field default is 1: aowlmony's sem
+  # fills an omitted field with the type's zero, not the declared default, and
+  # a hexer built by aowlmony then numbered the first suspension label 0 -- the
+  # same number as the entry state, so a passive proc got two `.s0` procs.
+  var currentProc = ProcContext(kind: IsNormal, labelCounter: 1)
   swap(c.currentProc, currentProc)
   var init = createTokenBuf(20)
   let iter = n
