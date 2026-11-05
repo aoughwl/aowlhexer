@@ -14,8 +14,9 @@ WORK="${AOWLHEXER_STACK_WORK:-$ROOT/.stacktest}"
 LIMIT="${LIMIT:-300}"
 export PATH="/c/msys64/ucrt64/bin:$PATH" AOWL_HEXER="$HEXER"
 pass=0; fail=0
-for src in "$ROOT"/tests/regress_stack/*.nim; do
-  name="$(basename "$src" .nim)"; d="$WORK/$name"; rm -rf "$d"; mkdir -p "$d"
+for src in "$ROOT"/tests/regress_stack/*.nim "$ROOT"/tests/regress_stack/*.aowl; do
+  [ -f "$src" ] || continue
+  name="$(basename "$src")"; name="${name%.*}"; d="$WORK/$name"; rm -rf "$d"; mkdir -p "$d"
   log="$( cd "$T/aowlmony/tools/driver" && timeout "$LIMIT" node driver.js "$src" \
       --cwd "$T/aowlmony" --lib "$T/aowlmony/rt/lib" --nc "$d/nc" 2>&1 < /dev/null )"
   rc=$?
@@ -23,7 +24,7 @@ for src in "$ROOT"/tests/regress_stack/*.nim; do
   if [ "$rc" = 124 ]; then echo "FAIL $name: no result within ${LIMIT}s (hexer hang)"; fail=$((fail+1)); continue; fi
   if [ -z "$exe" ] || [ ! -f "$exe" ]; then echo "FAIL $name: no executable"; echo "$log" | tail -4 | sed 's/^/     | /'; fail=$((fail+1)); continue; fi
   out="$("$exe" 2>&1)"
-  if [ "$(echo "$out" | tr -d '\r')" = "$(cat "$src.expected" 2>/dev/null || cat "${src%.nim}.expected")" ]; then pass=$((pass+1)); else echo "FAIL $name: output differs"; fail=$((fail+1)); fi
+  if [ "$(echo "$out" | tr -d '\r')" = "$(cat "$src.expected" 2>/dev/null || cat "${src%.*}.expected")" ]; then pass=$((pass+1)); else echo "FAIL $name: output differs"; fail=$((fail+1)); fi
 done
 echo "regress_stack: $pass passed, $fail failed"
 [ "$fail" = 0 ]
