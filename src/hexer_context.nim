@@ -21,6 +21,9 @@ import hsizeof
 
 export RcField, DataField
 
+const
+  EnvLocalName* = "`el.0" ## the local holding a routine's closure environment
+
 type
   EContext* = object
     dir*, main*, ext*: string

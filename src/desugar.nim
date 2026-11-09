@@ -1010,7 +1010,10 @@ proc tr(c: var Context; dest: var TokenBuf; n: var Cursor; isTopScope = false) =
       of LocalDecls:
         trLocal c, dest, n
       of ProcS, FuncS, MethodS, ConverterS:
-        trProc c, dest, n
+        if n.firstSon.kind == DotToken: # no name: a type, not a declaration
+          takeTree dest, n
+        else:
+          trProc c, dest, n
       of MacroS, IteratorS, TemplateS, EmitS, BreakS, ContinueS,
         ForS, IncludeS, ImportS, FromimportS, ImportexceptS,
         ExportS, CommentS,

@@ -87,6 +87,15 @@ proc handleCmdLine*() =
     of cmdArgument:
       if action.len == 0:
         action = key.normalize
+      elif key.len > 1 and key[0] == '@':
+        # A response file, one path per line: `dl` on a program of hundreds of
+        # modules does not fit Windows' 32K command line.
+        try:
+          for line in splitLines(readFile(key.substr(1))):
+            let path = strip(line)
+            if path.len > 0: files.add path
+        except:
+          quit "could not read response file: " & key
       else:
         files.add key
     of cmdLongOption, cmdShortOption:

@@ -191,6 +191,42 @@ proc containsRoot(tree: var Cursor; x: Cursor): bool =
       inc tree
     if nested == 0: break
 
+proc storeReadsLocation(lhs: Cursor; x: Cursor): bool =
+  ## Does a store to `lhs` have to read `x` to find out where to store? A store
+  ## through a pointer does:
+  ##
+  ##   let b = r    # <- `x`: is this the last read of `r`?
+  ##   r.v = 2      # (asgn (dot (deref r) v) 2)
+  ##
+  ## Moving `r` into `b` leaves this store going through nil. So do an index
+  ## expression and anything else that is evaluated. A plain partial store,
+  ## `a.f = 1` on an object `a`, only writes: it does not need the old `a`, and
+  ## leaves it movable.
+  var n = lhs
+  result = false
+  while true:
+    case n.exprKind
+    of DotX:
+      inc n
+    of TupatX, AtX, ArratX:
+      inc n
+      var index = n
+      skip index
+      if index.kind == ParLe or index.kind == Symbol:
+        if containsRoot(index, x): return true
+    of ConvKinds:
+      inc n
+      skip n # type part
+    of BaseobjX:
+      inc n
+      skip n # type part
+      skip n # skip intlit
+    else:
+      break
+  if n.kind != Symbol:
+    var base = n
+    result = containsRoot(base, x)
+
 proc buildFindStartIndex(cf: TokenBuf; srcLen: int): seq[FindStartEntry] =
   ## One-pass scan of the just-built CF buffer that records, for each
   ## payload value, the *first* CF token whose `info` carries it and the
@@ -306,6 +342,10 @@ proc singlePath(pc: Cursor; nested: int; x: Cursor; pcs: var seq[Cursor];
               return false
             # the path leads to a redefinition of 's' --> sink 's'.
             break
+          let lhsAt = pc
+          if storeReadsLocation(pc, x):
+            otherUsage = lhsAt
+            return false
           skip pc # skip left-hand-side
           # right-hand-side is a simple use expression. Use `containsRoot`, not
           # `containsUsage`: when `x` is a partial path like `a.field`, a later

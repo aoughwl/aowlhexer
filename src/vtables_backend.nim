@@ -335,6 +335,22 @@ proc classData(typ: Cursor): (int, UHash) =
   if n.typeKind in {RefT, PtrT}:
     inc n
   result = (0, UHash(0))
+  # `y of D` can name the ref type itself, `D`, where the object type `D.Obj` is
+  # what has the class data: hashing the ref's name never matched, so the test
+  # was false for every object.
+  var depth = 0
+  while n.kind == Symbol and depth < 20:
+    inc depth
+    let res = tryLoadSym(n.symId)
+    if res.status != LacksNothing or res.decl.stmtKind != TypeS: break
+    let body = asTypeDecl(res.decl).body
+    if body.typeKind in {RefT, PtrT}:
+      n = body
+      inc n
+    elif body.kind == Symbol:
+      n = body
+    else:
+      break
   if n.kind == Symbol:
     let s = n.symId
     for _ in inheritanceChain(s): inc result[0]
@@ -522,6 +538,8 @@ proc trBaseobj(c: var Context; dest: var TokenBuf; nn: var Cursor) =
     copyIntoKind dest, ExprX, info:
       copyIntoKind dest, StmtsS, info:
         let tmp = needsTemp(c, x)
+        # The temp is what the check below is asked about.
+        let xType = getType(c.typeCache, x)
         case tmp.kind
         of UsesSelf:
           discard "nothing to do"
@@ -532,6 +550,7 @@ proc trBaseobj(c: var Context; dest: var TokenBuf; nn: var Cursor) =
             dest.addSubtree getType(c.typeCache, x)
             var x = x
             tr c, dest, x
+          c.typeCache.registerLocal(tmp.sym, VarY, xType)
         of UsesTempPtr:
           copyIntoKind dest, VarS, info:
             dest.addSymDef tmp.sym, info
@@ -541,6 +560,7 @@ proc trBaseobj(c: var Context; dest: var TokenBuf; nn: var Cursor) =
             copyIntoKind dest, AddrX, info:
               var x = x
               tr c, dest, x
+          c.typeCache.registerLocalPtrOf(tmp.sym, VarY, xType)
 
         var buf = createTokenBuf(3)
         if tmp.kind == UsesTempPtr:

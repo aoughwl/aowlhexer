@@ -676,6 +676,15 @@ proc trCond(c: var Context; dest: var TokenBuf; n: var Cursor; tar: var Target; 
   else:
     trExpr c, dest, n, tar
 
+proc trBranchStmt(c: var Context; dest: var TokenBuf; n: var Cursor; info: PackedLineInfo) =
+  ## A branch has one son. The lowering of a call on a closure writes the bare call
+  ## there, and lowering an argument of it can give several statements.
+  if n.stmtKind == StmtsS:
+    trStmt c, dest, n
+  else:
+    copyIntoKind dest, StmtsS, info:
+      trStmt c, dest, n
+
 proc trIf(c: var Context; dest: var TokenBuf; n: var Cursor; tar: var Target) =
   # if cond: a elif condB: b else: c
   # -->
@@ -714,7 +723,7 @@ proc trIf(c: var Context; dest: var TokenBuf; n: var Cursor; tar: var Target) =
             copyIntoKind dest, StmtsS, info:
               trExprInto c, dest, n, tmp
           else:
-            trStmt c, dest, n
+            trBranchStmt c, dest, n, info
         skipParRi n
       of ElseU:
         inc n
@@ -722,7 +731,7 @@ proc trIf(c: var Context; dest: var TokenBuf; n: var Cursor; tar: var Target) =
           copyIntoKind dest, StmtsS, info:
             trExprInto c, dest, n, tmp
         else:
-          trStmt c, dest, n
+          trBranchStmt c, dest, n, info
         skipParRi n
       of NilU, NotnilU, KvU, VvU, RangeU, RangesU, ParamU,
          TypevarU, StaticTypevarU, EfldU, FldU, WhenU, TypevarsU, CaseU, OfU,

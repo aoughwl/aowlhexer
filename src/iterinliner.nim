@@ -227,30 +227,27 @@ proc copyWithMapping(dest: var TokenBuf; c: var Cursor; mapping: Table[SymId, Sy
   ## (with distinct labels) on every yield expansion of the outer iterator.
   case c.kind
   of ParLe:
-    var depth = 0
-    while true:
-      case c.kind
-      of ParLe:
-        dest.add c
-        inc c
-        inc depth
-      of ParRi:
-        dest.add c
-        inc c
-        dec depth
-        if depth == 0: break
-      of Symbol:
-        let s = c.symId
-        if mapping.hasKey(s):
-          dest.add symToken(mapping.getOrQuit(s), c.info)
-        else:
-          dest.add c
-        inc c
-      of EofToken:
-        bug "unexpected EOF in copyWithMapping"
-      else:
-        dest.add c
-        inc c
+    if c.exprKind in {DotX, DdotX}:
+      # A field is not a reference to a local, though both can be spelled `x.0`:
+      # `var slots = ""` next to `for s in e.slots` must leave `e.slots` alone.
+      dest.add c
+      inc c
+      copyWithMapping(dest, c, mapping)
+      while c.kind != ParRi:
+        dest.takeTree c
+    elif c.substructureKind == KvU:
+      dest.add c
+      inc c
+      dest.takeTree c
+      while c.kind != ParRi:
+        copyWithMapping(dest, c, mapping)
+    else:
+      dest.add c
+      inc c
+      while c.kind != ParRi:
+        copyWithMapping(dest, c, mapping)
+    dest.add c
+    inc c
   of Symbol:
     let s = c.symId
     if mapping.hasKey(s):
@@ -258,6 +255,8 @@ proc copyWithMapping(dest: var TokenBuf; c: var Cursor; mapping: Table[SymId, Sy
     else:
       dest.add c
     inc c
+  of EofToken:
+    bug "unexpected EOF in copyWithMapping"
   else:
     dest.add c
     inc c
@@ -912,6 +911,11 @@ proc transformStmt(e: var EContext; dest: var TokenBuf; c: var Cursor) =
     of TemplateS:
       dest.takeTree c
     of FuncS, ProcS, ConverterS, MethodS:
+      if c.firstSon.kind == DotToken:
+        # No name, so not a declaration: a type, as in the tuple type of
+        # `(tupconstr (tuple (proc . . . . params ret pragmas .)) ...)`.
+        dest.takeTree c
+        return
       dest.add c
       inc c
       takeTree(dest, c) # name

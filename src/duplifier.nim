@@ -75,7 +75,9 @@ proc isLastRead(c: var Context; n: Cursor): bool =
 
   let r = rootOf(n, CannotFollowDerefs)
   result = false
-  if r != NoSymId:
+  # A closure made from an environment co-owns it while the routine still works on
+  # it, so it is never a move out of the local.
+  if r != NoSymId and r != pool.syms.getOrIncl(EnvLocalName):
     var canAnalyse = false
     let v = c.typeCache.getLocalInfo(r)
     if v.kind == ParamY:
@@ -309,11 +311,31 @@ proc trReturn(c: var Context; n: var Cursor) =
     c.dest.addParRi() # end of StmtsS
     skipParRi(n) # skip ParRi
 
+proc derefsBoxedRef(c: var Context; ptrOperand: Cursor): bool =
+  ## The pointer inside a `(deref ptrOperand)` has boxed `ref` type, so a field
+  ## read through the deref has to hop through the object payload (`d`) rather
+  ## than name the field on the ref cell itself.
+  var typ = getType(c.typeCache, ptrOperand, {SkipAliases})
+  if typ.kind == ParLe and typ.typeKind == SinkT:
+    inc typ
+  result = not cursorIsNil(typ) and typ.typeKind == RefT
+
 proc evalLeftHandSide(c: var Context; le: var Cursor): TokenBuf =
   result = createTokenBuf(10)
   if le.kind == Symbol or (le.exprKind in {DerefX, HderefX} and le.firstSon.kind == Symbol):
     # simple enough:
-    takeTree result, le
+    if le.kind == ParLe and derefsBoxedRef(c, le.firstSon):
+      # `r[] = v`: what is stored is the object inside the ref cell, as `trDeref`
+      # spells it. The bare deref is the cell, which neither the destroy of the
+      # old value nor the store can take.
+      let info = le.info
+      result.addParLe DotX, info
+      result.takeTree le
+      result.add symToken(pool.syms.getOrIncl(DataField), info)
+      result.addIntLit(0, info) # inheritance
+      result.addParRi()
+    else:
+      takeTree result, le
   else:
     let typ = getType(c.typeCache, le)
     let info = le.info
@@ -507,8 +529,7 @@ proc trAsgn(c: var Context; n: var Cursor) =
         callWasMoved c, ri, leType
         callDestroy(c, destructor, lhs, leType)
         copyInto c.dest, n:
-          var lhsAsCursor = cursorAt(lhs, 0)
-          tr c, lhsAsCursor, DontCare
+          copyTree c.dest, lhs
           copyIntoSymUse c.dest, tmp, ri.info
           n = n2
           skip n, SkipFull
@@ -526,8 +547,7 @@ proc trAsgn(c: var Context; n: var Cursor) =
         # `let tmp = x; x =bitcopy =dup(y); =destroy(tmp)`
         let tmp = tempOfTrArg(c, le, leType)
         copyInto c.dest, n:
-          var lhsAsCursor = cursorAt(lhs, 0)
-          tr c, lhsAsCursor, DontCare
+          copyTree c.dest, lhs
           n = ri
           callDup c, n
         callDestroy(c, destructor, tmp, le.info, leType)
@@ -535,8 +555,7 @@ proc trAsgn(c: var Context; n: var Cursor) =
         if isNotFirstAsgn:
           callDestroy(c, destructor, lhs, leType)
         copyInto c.dest, n:
-          var lhsAsCursor = cursorAt(lhs, 0)
-          tr c, lhsAsCursor, DontCare
+          copyTree c.dest, lhs
           n = ri
           callDup c, n
 
@@ -639,15 +658,6 @@ proc trExplicitTrace(c: var Context; n: var Cursor) =
 
 when not defined(nimony):
   proc trProcDecl(c: var Context; n: var Cursor; parentNodestroy = false)
-
-proc derefsBoxedRef(c: var Context; ptrOperand: Cursor): bool =
-  ## The pointer inside a `(deref ptrOperand)` has boxed `ref` type, so a field
-  ## read through the deref has to hop through the object payload (`d`) rather
-  ## than name the field on the ref cell itself.
-  var typ = getType(c.typeCache, ptrOperand, {SkipAliases})
-  if typ.kind == ParLe and typ.typeKind == SinkT:
-    inc typ
-  result = not cursorIsNil(typ) and typ.typeKind == RefT
 
 proc addDataFieldHop(c: var Context; info: PackedLineInfo) =
   ## Emit the `d 0` that follows an already-emitted `(deref refptr)` to reach the
