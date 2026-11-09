@@ -4,3 +4,4 @@ bin/
 .difftest/
 .difftest-game/
 .raisestest/
+.stacktest/

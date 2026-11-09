@@ -158,6 +158,11 @@ proc localToField(c: var Context; n: Cursor; local, typ: SymId): SymId =
 proc trCall(c: var Context; dest: var TokenBuf; n: var Cursor) =
   dest.add n
   inc n
+  # A module that only CALLS a closure a type from another module holds, and
+  # declares none of its own, still needs pass 2 to turn that call into
+  # `fn(args, env)`: without it the C compiler is handed a tuple to call.
+  if not c.hasClosures and procHasPragma(c.typeCache.getType(n), ClosureP):
+    c.hasClosures = true
   if n.kind == Symbol:
     # if a closure proc is called, we don't want to see it as "escaping".
     dest.add n
@@ -315,6 +320,15 @@ proc tr(c: var Context; dest: var TokenBuf; n: var Cursor) =
       of ToClosureX:
         c.hasClosures = true
         trSons(c, dest, n)
+      of KvX:
+        # The key names a field, even when a captured local is spelled the same:
+        # `E(n: n)` inside a closure over `n` must only rewrite the value.
+        dest.add n
+        inc n
+        takeTree dest, n
+        while n.hasMore:
+          tr(c, dest, n)
+        dest.takeParRi n
       of ErrX, SufX, AtX, DerefX, DotX, PatX, ParX, AddrX,
         InfX, NeginfX, NanX, FalseX, TrueX, AndX, OrX, XorX,
         NotX, NegX, SizeofX, AlignofX, OffsetofX, OconstrX,
@@ -332,7 +346,7 @@ proc tr(c: var Context; dest: var TokenBuf; n: var Cursor) =
         EqsetX, LesetX, LtsetX, InsetX, CardX, EmoveX,
         DestroyX, DupX, CopyX, WasmovedX, SinkhX, TraceX,
         InternalTypeNameX, InternalFieldPairsX, FailedX, IsX,
-        EnvpX, KvX, NoExpr:
+        EnvpX, NoExpr:
         trSons(c, dest, n)
   of ParRi:
     bug "unexpected ')' inside"

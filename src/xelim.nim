@@ -300,12 +300,34 @@ proc trExprLoop(c: var Context; dest: var TokenBuf; n: var Cursor; tar: var Targ
       trExpr c, dest, n, tar
   tar.t.addParRi()
 
+proc containsCall(n: Cursor): bool =
+  ## Whether a call or a statement-expression sits anywhere under `n`.
+  var nested = 0
+  var n = n
+  while true:
+    case n.kind
+    of ParLe:
+      if n.exprKind in CallKinds or n.exprKind == ExprX: return true
+      inc n
+      inc nested
+    of ParRi:
+      inc n
+      dec nested
+    else:
+      inc n
+    if nested == 0: break
+  false
+
 proc trAggregateValue(c: var Context; dest: var TokenBuf; n: var Cursor; tar: var Target) =
-  ## Bind a *call* in a value-position of an aggregate to a fresh cursor temp
-  ## so the call evaluates at a deterministic textual point relative to
-  ## sibling pre-statements (e.g. a sibling's `wasMoved`). Non-call
-  ## expressions are pure reads and are passed through to `trExpr`
-  ## unchanged.
+  ## Bind a value holding a *call* in a value-position of an aggregate to a
+  ## fresh cursor temp so the call evaluates at a deterministic textual point
+  ## relative to sibling pre-statements (e.g. a sibling's `wasMoved`). Other
+  ## expressions are pure reads and are passed through to `trExpr` unchanged.
+  ##
+  ## The call may be nested. Two closures over one environment are
+  ## `(tupconstr fn (cast (dup env)))` and `(tupconstr fn (cast env-moved))`:
+  ## left inline, the first's `dup` ran after the second's `wasMoved`, and
+  ## duplicated nil. Every object with two closure fields crashed on this.
   ##
   ## **The temp is a `cursor`, not a `let`.** The aggregate constructor
   ## that immediately consumes this temp is the rightful owner of the
@@ -316,8 +338,19 @@ proc trAggregateValue(c: var Context; dest: var TokenBuf; n: var Cursor; tar: va
   ## non-owning view that goes out of scope without cleanup, which is
   ## exactly what xelim needs here. Surfaced 2026-05-01 by self-host
   ## debugging — see `bug_self_host_nifconfig_destroy.md`.
-  if n.kind != ParLe or n.exprKind notin CallKinds:
+  if n.kind != ParLe or not containsCall(n):
     trExpr c, dest, n, tar
+    return
+  if n.substructureKind == KvU:
+    # A named tuple's value is `(kv name value)`: the value is what gets bound.
+    tar.t.takeToken n
+    if n.hasMore:
+      tar.t.takeTree n
+    if n.hasMore:
+      trAggregateValue c, dest, n, tar
+    while n.hasMore:
+      tar.t.takeTree n
+    tar.t.takeToken n
     return
 
   let info = n.info
