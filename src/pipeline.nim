@@ -11,7 +11,7 @@ import std / [assertions, tables, hashes, sets, syncio]
 include ".." / lib / nifprelude
 include ".." / lib / compat2
 
-import ".." / nimony / [nimony_model, programs, decls]
+import ".." / nimony / [nimony_model, programs, decls, typeprops]
 import hexer_context, iterinliner, desugar, xelim, duplifier, lifter, destroyer,
   constparams, vtables_backend, eraiser, lambdalifting, cps, passes,
   funcsummary, intramodinliner, arcopt
@@ -42,6 +42,39 @@ proc publishHooks*(n: var Cursor) =
         while n.hasMore: publishHooks(n)
   of ParRi:
     raiseAssert "BUG: unexpected ParRi in publishHooks"
+  else:
+    inc n
+
+proc liftClassDestroyers(n: var Cursor; lifter: var LiftingCtx; keep: var seq[TokenBuf]) =
+  ## A vtable is written where its class is declared, so that is where its
+  ## destructor has to exist. The frontend only forges one for what it sees as not
+  ## trivial, and a closure in a field is trivial to it: lowered, the class holds a
+  ## reference to an environment. Nothing else is sure to ask for the hook here, as
+  ## the code that drops the last reference can be in another module.
+  case n.kind
+  of ParLe:
+    case n.stmtKind
+    of TypeS:
+      let d = asTypeDecl(n)
+      if not d.isGeneric and d.name.kind == SymbolDef and d.body.typeKind == ObjectT and hasRtti(d.name.symId):
+        var buf = createTokenBuf(1)
+        buf.addSymUse d.name.symId, n.info
+        keep.add ensureMove buf
+        discard getDestructor(lifter, beginRead(keep[keep.len-1]), n.info)
+      skip n
+    of TemplateS, MacroS, EmitS:
+      skip n
+    of ProcS, FuncS, MethodS, ConverterS, IteratorS:
+      if asRoutine(n).isGeneric:
+        skip n
+      else:
+        n.into:
+          while n.hasMore: liftClassDestroyers(n, lifter, keep)
+    else:
+      n.into:
+        while n.hasMore: liftClassDestroyers(n, lifter, keep)
+  of ParRi:
+    raiseAssert "BUG: unexpected ParRi in liftClassDestroyers"
   else:
     inc n
 
@@ -83,6 +116,14 @@ proc transform*(c: var EContext; n: Cursor; moduleSuffix: string; bits: int): To
   # Pass 8: Inject Destructors (RAII/Cleanup)
   pass.prepareForNext("destroyer")
   injectDestructors(pass, c.liftingCtx)
+
+  regenerateStaleHooks c.liftingCtx[], pass.dest
+  block:
+    var keep: seq[TokenBuf] = @[]
+    var scan = beginRead(pass.dest)
+    liftClassDestroyers scan, c.liftingCtx[], keep
+    endRead(pass.dest)
+    genMissingHooks c.liftingCtx[]
 
   # Special handling: Merge generated hooks
   assert pass.dest[pass.dest.len-1].kind == ParRi

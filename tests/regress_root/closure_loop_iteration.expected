@@ -1,0 +1,30 @@
+letlocal 0
+letlocal 10
+letlocal 20
+loopvar 0
+loopvar 1
+loopvar 2
+while 0
+while 1
+while 2
+counter 1 2 101
+factory 0
+factory 1
+factory 2
+outer 1 2
+cb 0
+cb 2
+cb 3
+ret 4
+nested 2000
+nested 2001
+nested 2010
+nested 2011
+direct 11
+direct 12
+after 12 13
+stack 1
+stack 2
+str 55 0
+str 55 1
+str 55 2

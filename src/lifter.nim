@@ -960,6 +960,10 @@ proc genProcDecl(c: var LiftingCtx; sym: SymId; typ: TypeCursor) =
 
   publishProc(sym, c.dest, procStart)
 
+var retiredBodies: seq[TokenBuf] = @[]
+  ## The trees replaced by `regenerateStaleHooks`: published hooks and types can
+  ## still hold a cursor into them.
+
 proc genMissingHooks*(c: var LiftingCtx) =
   # remember that genProcDecl does mutate c.requests so be robust against that:
   while c.requests.len > 0:
@@ -979,6 +983,114 @@ proc genMissingHooks*(c: var LiftingCtx; dest: var TokenBuf) =
   genMissingHooks(c)
   if c.dest.len > 0:
     dest.add c.dest
+
+proc isLoweredClosure(n: Cursor): bool =
+  ## `(tuple <proctype> (ref RootObj))`, what lambda lifting turns a closure type into.
+  if n.typeKind != TupleT: return false
+  var t = n
+  inc t
+  if t.kind != ParLe or t.typeKind != ProctypeT: return false
+  skip t
+  if t.kind != ParLe or t.typeKind != RefT: return false
+  skip t
+  result = t.kind == ParRi
+
+proc reachesClosureByValue(t: Cursor; depth: int): bool =
+  ## Does a value of type `t` hold a closure itself, in lowered form? A `ref` in a
+  ## field has its own hook; the `ref` a hook is for is looked through.
+  result = false
+  if depth > 12: return
+  var n = t
+  if n.kind == Symbol:
+    let res = tryLoadSym(n.symId)
+    if res.status != LacksNothing or res.decl.stmtKind != TypeS: return
+    let d = asTypeDecl(res.decl)
+    if d.isGeneric: return
+    return reachesClosureByValue(d.body, depth + 1)
+  if isLoweredClosure(n): return true
+  case n.typeKind
+  of RefT:
+    if depth == 0 or depth == 1:
+      inc n
+      result = reachesClosureByValue(n, 2)
+  of SinkT, ArrayT, DistinctT:
+    result = reachesClosureByValue(n.firstSon, depth + 1)
+  of TupleT:
+    inc n
+    while n.hasMore:
+      if reachesClosureByValue(getTupleFieldType(n), depth + 1): return true
+      skip n
+  of ObjectT:
+    inc n
+    if n.kind != DotToken:
+      var parent = n
+      if parent.typeKind in {RefT, PtrT}: inc parent
+      if reachesClosureByValue(parent, depth + 1): return true
+    skip n
+    while n.hasMore:
+      if n.substructureKind in {FldU, GfldU}:
+        let r = takeLocal(n, SkipFinalParRi)
+        if not hasPragma(r.pragmas, CursorP) and reachesClosureByValue(r.typ, depth + 1): return true
+      else:
+        skip n
+  else:
+    discard
+
+proc forgedHookOp(name: string; op: var AttachedOp): bool =
+  ## Is this the name of a hook the frontend wrote for a type? `=destroy_<type>`,
+  ## where a user's is just `=destroy`.
+  for o in [attachedDestroy, attachedWasMoved, attachedDup, attachedCopy, attachedSink]:
+    let prefix = "=" & hookName(o) & "_"
+    if name.len > prefix.len:
+      var same = true
+      for i in 0 ..< prefix.len:
+        if name[i] != prefix[i]:
+          same = false
+          break
+      if same:
+        op = o
+        return true
+  result = false
+
+proc staleForgedHook(c: var LiftingCtx; n: Cursor): bool =
+  ## The frontend has no closure tuples: to it a closure is a trivial word, and the
+  ## hooks it wrote for a type with one in it leave out the reference to the
+  ## environment. Copying such a type does not count it, destroying it does not drop
+  ## it. Written again from the lowered type, under the same name, as other modules
+  ## call them by that.
+  result = false
+  if n.stmtKind notin {ProcS, MethodS} or n.firstSon.kind != SymbolDef: return
+  let sym = n.firstSon.symId
+  var op = attachedDestroy
+  if not forgedHookOp(pool.syms[sym], op): return
+  let r = asRoutine(n)
+  if r.isGeneric or r.params.kind != ParLe: return
+  var p = r.params
+  inc p
+  if not p.hasMore: return
+  var typ = takeLocal(p, SkipFinalParRi).typ
+  if typ.typeKind == MutT: inc typ
+  if reachesClosureByValue(typ, 0):
+    c.requests.add GenHookRequest(sym: sym, typ: typ, op: op)
+    result = true
+
+proc regenerateStaleHooks*(c: var LiftingCtx; dest: var TokenBuf) =
+  ## Replaces those hooks of the module. Call before the lifted hooks are merged.
+  var old = move dest
+  dest = createTokenBuf(old.len)
+  var n = beginRead(old)
+  assert n.stmtKind == StmtsS
+  dest.add n
+  inc n
+  while n.hasMore:
+    if staleForgedHook(c, n):
+      skip n
+    else:
+      dest.takeTree n
+  dest.takeParRi n
+  genMissingHooks(c)
+  endRead(old)
+  retiredBodies.add ensureMove old
 
 proc createLiftingCtx*(thisModuleSuffix: string, bits: int; frontendHooks: ptr Table[SymId, HooksPerType] = nil): ref LiftingCtx =
   (ref LiftingCtx)(op: attachedDestroy, info: NoLineInfo, thisModuleSuffix: thisModuleSuffix, bits: bits, routineKind: ProcY, frontendHooks: frontendHooks)

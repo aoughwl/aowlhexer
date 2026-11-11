@@ -2,6 +2,7 @@ import std / [assertions, tables, hashes, sets, syncio]
 include ".." / lib / nifprelude
 include ".." / lib / compat2
 import hexer_context
+import ".." / lib / symparser
 import ".." / nimony / [nimony_model, programs, decls, typenav]
 import duplifier
 
@@ -73,13 +74,45 @@ proc getForVars(e: var EContext, forVars: Cursor): seq[Cursor] =
     result.add forVars
     skip forVars
 
+proc routineMentions(n: Cursor; s: SymId): bool =
+  ## Does a routine declared in `n` use the local `s`?
+  var n = n
+  var nested = 0
+  var inRoutine = 0
+  var stack: seq[bool] = @[]
+  while true:
+    case n.kind
+    of ParLe:
+      let isR = n.stmtKind in {ProcS, FuncS, ConverterS, IteratorS, MethodS} and n.firstSon.kind == SymbolDef
+      stack.add isR
+      if isR: inc inRoutine
+      inc nested
+    of ParRi:
+      if stack.pop(): dec inRoutine
+      dec nested
+    of Symbol:
+      if inRoutine > 0 and n.symId == s: return true
+    else:
+      discard
+    inc n
+    if nested <= 0: break
+  result = false
+
 proc connectSingleExprToLoopVar(e: var EContext; dest: var TokenBuf; c: var Cursor;
-          forVar: Cursor; res: var Table[SymId, SymId]) =
+          forVar: Cursor; res: var Table[SymId, SymId]; body: Cursor) =
   let local = asLocal(forVar)
   let destSym = local.name.symId
   let info = local.name.info
   case c.kind
   of Symbol:
+    if routineMentions(body, destSym):
+      # A closure keeps the value of its iteration, not the iterator's variable,
+      # which goes on counting: a new local per iteration, see lambda lifting.
+      var typ = local.typ
+      let freshSym = pool.syms.getOrIncl("`ii." & $e.getTmpId)
+      res[destSym] = freshSym
+      createDecl(e, dest, freshSym, typ, c, info, VarS, needsAddr=false)
+      return
     let val = c.symId
     res[destSym] = val
     inc c
@@ -108,19 +141,19 @@ proc startTupleAccess(s: SymId; info: PackedLineInfo; needsDeref: bool): TokenBu
   else:
     result.add symToken(s, info)
 
-proc createYieldMapping(e: var EContext; dest: var TokenBuf; c: var Cursor, vars: Cursor, yieldType: Cursor): Table[SymId, SymId] =
+proc createYieldMapping(e: var EContext; dest: var TokenBuf; c: var Cursor, vars: Cursor, yieldType: Cursor; body: Cursor): Table[SymId, SymId] =
   result = initTable[SymId, SymId]()
 
   let forVars = getForVars(e, vars)
 
   if forVars.len == 1:
-    connectSingleExprToLoopVar(e, dest, c, forVars[0], result)
+    connectSingleExprToLoopVar(e, dest, c, forVars[0], result, body)
   else:
     if c.kind == ParLe and c.exprKind == TupX:
       inc c
       var i = 0
       while c.hasMore:
-        connectSingleExprToLoopVar(e, dest, c, forVars[i], result)
+        connectSingleExprToLoopVar(e, dest, c, forVars[i], result, body)
         inc i
       skipParRi(e, c)
     else:
@@ -261,6 +294,27 @@ proc copyWithMapping(dest: var TokenBuf; c: var Cursor; mapping: Table[SymId, Sy
     dest.add c
     inc c
 
+proc isInlinedRoutineDecl(c: Cursor): bool =
+  c.stmtKind in {ProcS, FuncS, ConverterS} and c.firstSon.kind == SymbolDef
+
+proc inlinedRoutineName(e: var EContext; old: SymId; mapping: var Table[SymId, SymId]): SymId =
+  ## A routine in a body that is copied, per `yield` or per call of the iterator, is
+  ## a routine per copy: the locals it captures are not the same ones. All copies
+  ## under one name would have the first one's body win in lambda lifting, and the
+  ## closure of the second `yield` would write to the locals of the first.
+  if mapping.hasKey(old):
+    result = mapping.getOrQuit(old)
+  elif not e.inlinedRoutines.containsOrIncl(old):
+    result = old
+    mapping[old] = old
+  else:
+    var base = pool.syms[old]
+    let module = extractModule(base)
+    extractBasename base
+    result = pool.syms.getOrIncl(base & "`i" & $e.instId & ".0." & module)
+    inc e.instId
+    mapping[old] = result
+
 proc inlineLoopBody(e: var EContext; dest: var TokenBuf; c: var Cursor; mapping: var Table[SymId, SymId]; fromForloop = false) =
   case c.kind
   of Symbol:
@@ -340,8 +394,25 @@ proc inlineLoopBody(e: var EContext; dest: var TokenBuf; c: var Cursor; mapping:
       # value:
       inlineLoopBody(e, dest, c, mapping)
       dest.takeParRi(c)
-    of CallS, CmdS, GvarS, TvarS, ConstS, GletS, TletS, ProcS,
-        FuncS, IteratorS, ConverterS, MethodS, MacroS, TemplateS,
+    of ProcS, FuncS, ConverterS:
+      if isInlinedRoutineDecl(c):
+        let start = dest.len
+        dest.add c
+        inc c
+        let old = c.symId
+        let fresh = inlinedRoutineName(e, old, mapping)
+        dest.add symdefToken(fresh, c.info)
+        inc c
+        e.loop(dest, c):
+          inlineLoopBody(e, dest, c, mapping)
+        if fresh != old: programs.publish(fresh, dest, start)
+      else:
+        dest.add c
+        inc c
+        e.loop(dest, c):
+          inlineLoopBody(e, dest, c, mapping)
+    of CallS, CmdS, GvarS, TvarS, ConstS, GletS, TletS,
+        IteratorS, MethodS, MacroS, TemplateS,
         TypeS, EmitS, AsgnS, ScopeS, IfS, WhenS, CaseS, RetS,
         YldS, PragmasS, PragmaxS, InclS, ExclS, IncludeS, ImportS,
         ImportasS, FromimportS, ImportexceptS, ExportS,
@@ -397,7 +468,7 @@ proc inlineIteratorBody(e: var EContext; dest: var TokenBuf;
         e.continues.add lab
 
       inc c # skips yield
-      var mapping = createYieldMapping(e, dest, c, forStmt.vars, yieldType)
+      var mapping = createYieldMapping(e, dest, c, forStmt.vars, yieldType, forStmt.body)
       var body = forStmt.body
       inlineLoopBody(e, dest, body, mapping, true)
 
@@ -432,6 +503,18 @@ proc replaceSymbol(e: var EContext; dest: var TokenBuf; c: var Cursor; relations
     dest.add c
     inc c
   of ParLe:
+    if isInlinedRoutineDecl(c):
+      let start = dest.len
+      dest.add c
+      inc c
+      let old = c.symId
+      let fresh = inlinedRoutineName(e, old, relations)
+      dest.add symdefToken(fresh, c.info)
+      inc c
+      e.loop(dest, c):
+        replaceSymbol(e, dest, c, relations)
+      if fresh != old: programs.publish(fresh, dest, start)
+      return
     case c.stmtKind
     of VarS, LetS, CursorS, PatternvarS:
       dest.add c

@@ -43,6 +43,8 @@ type
     continues*: seq[SymId] # how to translate `continue`
     exceptLabels*: seq[SymId] # how to translate `except`
     instId*: int # per forStmt
+    inlinedRoutines*: HashSet[SymId]
+      ## Routines declared in code that an iterator inlines, seen so far.
     tmpId*: int # per proc
     resultSym*: SymId
 
@@ -51,6 +53,12 @@ type
     liftingCtx*: ref LiftingCtx
     importedModuleSuffixes*: seq[string]
     initBody*: TokenBuf
+
+proc isEnvLocal*(s: SymId): bool =
+  ## Is this the local holding an environment, a routine's `EnvLocalName` or the one
+  ## of a loop body, spelled `el.<n>`?
+  let name = pool.syms[s]
+  result = name.len > 4 and name[0] == '`' and name[1] == 'e' and name[2] == 'l' and name[3] == '.'
 
 proc getTmpId*(e: var EContext): int {.inline.} =
   result = e.tmpId

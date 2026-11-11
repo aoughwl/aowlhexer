@@ -48,10 +48,47 @@ type
     vtableNames: Table[SymId, SymId]
     classes: seq[(SymId, bool)] # (class, declaredInThisModule)
     getRttiSym: SymId
+    deallocSym: SymId
     methodDecls: seq[MethodDecl]
 
 when not defined(nimony):
   proc tr(c: var Context; dest: var TokenBuf; n: var Cursor)
+
+const
+  DestroySlot = 0
+    ## Every class hierarchy has its `=destroy` in this slot, empty while no class
+    ## on the way down to the object has anything to destroy. Without a fixed slot
+    ## a `ref RootObj`, or a `ref` of any class with no destructor of its own, could
+    ## not reach the destructor of what it really points to: such a class has no
+    ## method to look up, and the index of a method slot depends on the subclass.
+
+proc isHookNamed(name, hook: string): bool =
+  ## The destructor the frontend or the lifter wrote for a type is a method called
+  ## `=destroy_<type>`: a user's is just `=destroy`.
+  if name.len < hook.len: return false
+  for i in 0 ..< hook.len:
+    if name[i] != hook[i]: return false
+  result = name.len == hook.len or name[hook.len] == '_'
+
+proc isDestroyHook(fn: SymId): bool =
+  var name = pool.syms[fn]
+  extractBasename name
+  result = isHookNamed(name, "=destroy")
+
+proc rootVTable(): VTable =
+  result = VTable(display: @[], methods: @[SymId(0)], state: Others)
+
+proc setMethod(vt: var VTable; sig: string; fn: SymId) =
+  ## Files `fn` under its signature, whether it overrides or is new.
+  if sig.len > 9 and isHookNamed(substr(sig, 0, 7), "=destroy") and sig[8] == ':':
+    vt.methods[DestroySlot] = fn
+  else:
+    let idx = vt.signatureToIndex.getOrDefault(sig, -1)
+    if idx == -1:
+      vt.methods.add fn
+      vt.signatureToIndex[sig] = vt.methods.len - 1
+    else:
+      vt.methods[idx] = fn
 
 proc computeVTableName(c: var Context; cls: SymId; middle = ".vt."): SymId =
   var clsName = splitSymName pool.syms[cls]
@@ -151,24 +188,19 @@ proc loadVTable(c: var Context; cls: SymId) =
 
   # now apply the diff:
   let diff = vtables_frontend.loadVTable(cls)
-  var dest = VTable(display: @[], methods: @[], state: Others)
+  var dest = rootVTable()
   if parent != SymId(0):
     let parentVT = addr c.vtables.getOrQuit(parent)
     dest.methods = parentVT[].methods
     dest.signatureToIndex = parentVT[].signatureToIndex
 
   for entry in diff:
-    let sig = pool.strings[entry.signature]
-    let idx = dest.signatureToIndex.getOrDefault(sig, -1)
-    if idx == -1:
-      dest.methods.add entry.fn
-      dest.signatureToIndex[sig] = dest.methods.len - 1
-    else:
-      dest.methods[idx] = entry.fn
+    setMethod dest, pool.strings[entry.signature], entry.fn
 
   c.vtables[cls] = ensureMove dest
 
 proc getMethodIndex(c: var Context; cls, fn: SymId): int =
+  if isDestroyHook(fn): return DestroySlot
   if not c.vtables.hasKey(cls):
     c.loadVTable(cls)
 
@@ -307,8 +339,116 @@ proc trObjConstr(c: var Context; dest: var TokenBuf; n: var Cursor) =
     tr c, dest, n
   takeParRi dest, n
 
+proc refClass(typ: Cursor): SymId =
+  ## The class of a `ref` type, if its objects have a vtable.
+  result = SymId(0)
+  var t = typ
+  if t.kind == Symbol: t = toTypeImpl(t)
+  if t.typeKind == RefT:
+    inc t
+    if t.typeKind == InvokeT: inc t
+    if t.kind == Symbol:
+      let res = tryLoadSym(t.symId)
+      if res.status == LacksNothing and res.decl.stmtKind == TypeS and
+          not asTypeDecl(res.decl).isGeneric and hasRtti(t.symId) and not isFinal(t):
+        result = t.symId
+
+proc trDealloc(c: var Context; dest: var TokenBuf; arg: Cursor; info: PackedLineInfo) =
+  ## What the hook of `ref T` knows about `T` says nothing about the class of the
+  ## object: a `ref RootObj` is what holds every environment of a closure, and has
+  ## no destructor to call. So all of them reach the destructor through the vtable,
+  ## emitted just before the `deallocFixed`. See `isRefHookDestroy` for the call
+  ## the hook may have had:
+  ##
+  ##   if x.vt != nil and x.vt.methods[DestroySlot] != nil:
+  ##     cast[proc (self: T)](x.vt.methods[DestroySlot])(x[])
+  if arg.kind != Symbol: return
+  let cls = refClass(getType(c.typeCache, arg))
+  if cls == SymId(0): return
+  var root = SymId(0)
+  var level = 0
+  for parent in inheritanceChain(cls):
+    root = parent
+    inc level
+  let class = ClassInfo(root: root, level: level, ptrKind: RefT)
+  template vtableField() =
+    genVtableField c, dest, arg, class, info
+  template slot() =
+    copyIntoKind dest, PatX, info:
+      copyIntoKind dest, DotX, info:
+        copyIntoKind dest, DerefX, info:
+          vtableField()
+        dest.addSymUse pool.syms.getOrIncl(MethodsField), info
+        dest.addIntLit 0, info
+      dest.addIntLit DestroySlot, info
+  copyIntoKind dest, IfS, info:
+    copyIntoKind dest, ElifU, info:
+      copyIntoKind dest, NeqX, info:
+        dest.addParPair PointerT, info
+        copyIntoKind dest, CastX, info:
+          dest.addParPair PointerT, info
+          vtableField()
+        dest.addParPair NilX, info
+      copyIntoKind dest, StmtsS, info:
+        copyIntoKind dest, IfS, info:
+          copyIntoKind dest, ElifU, info:
+            copyIntoKind dest, NeqX, info:
+              dest.addParPair PointerT, info
+              slot()
+              dest.addParPair NilX, info
+            copyIntoKind dest, StmtsS, info:
+              copyIntoKind dest, CallS, info:
+                copyIntoKind dest, CastX, info:
+                  copyIntoKind dest, ProctypeT, info:
+                    dest.addDotToken() # nilability tag
+                    copyIntoKind dest, ParamsU, info:
+                      copyIntoKind dest, ParamU, info:
+                        dest.addSymDef pool.syms.getOrIncl("self.0"), info
+                        dest.addDotToken() # no export marker
+                        dest.addDotToken() # no pragmas
+                        dest.addSymUse cls, info
+                        dest.addDotToken() # no default value
+                    dest.addDotToken() # no return type
+                    copyIntoKind dest, PragmasU, info:
+                      dest.addParPair Nimcall, info
+                  slot()
+                copyIntoKind dest, DotX, info:
+                  copyIntoKind dest, DerefX, info:
+                    dest.addSymUse arg.symId, info
+                  dest.add symToken(pool.syms.getOrIncl(DataField), info)
+                  dest.addIntLit 0, info
+
+proc isRefHookDestroy(c: var Context; fn: Cursor; forceStaticCall: bool): bool =
+  ## `(call =destroy_T (dot (deref x) d 0))` in the hook of `ref T`, a call `trDealloc`
+  ## is going to make right after. The hook named here can be one this module wrote
+  ## for a class of another module (the frontend calls a class with just closures
+  ## trivial), and such a method is in no vtable.
+  result = false
+  if forceStaticCall or fn.kind != Symbol or not isDestroyHook(fn.symId) or not isMethod(c, fn.symId):
+    return
+  var a = fn
+  inc a
+  if a.exprKind == DotX:
+    inc a
+    if a.exprKind == DerefX:
+      inc a
+      if a.kind == Symbol:
+        let x = a
+        inc a
+        if a.kind == ParRi:
+          inc a
+          if a.kind == Symbol and a.symId == pool.syms.getOrIncl(DataField):
+            result = refClass(getType(c.typeCache, x)) != SymId(0)
+
 proc trCall(c: var Context; dest: var TokenBuf; n: var Cursor; forceStaticCall: bool) =
   let fn = n.firstSon
+  if isRefHookDestroy(c, fn, forceStaticCall):
+    skip n
+    return
+  if fn.kind == Symbol and fn.symId == c.deallocSym:
+    var arg = fn
+    inc arg
+    trDealloc c, dest, arg, n.info
   if not forceStaticCall and fn.kind == Symbol and isMethod(c, fn.symId):
     dest.takeToken n # skip `(call)`
     trMethodCall c, dest, n
@@ -655,18 +795,9 @@ proc tr(c: var Context; dest: var TokenBuf; n: var Cursor) =
 
 proc processMethod(c: var Context; m: MethodDecl; methodName: string) =
   let sig = methodKey(methodName, m.paramRest)
-  # see if this is an override:
-  for inh in inheritanceChain(m.cls):
-    let methodIndex = c.vtables.getOrQuit(inh).signatureToIndex.getOrDefault(sig, -1)
-    if methodIndex != -1:
-      # register as override:
-      c.vtables.getOrQuit(m.cls).methods[methodIndex] = m.name
-      return
-  # not an override, register as a new base method:
-  let myVt = addr c.vtables.getOrQuit(m.cls)
-  let idx = myVt[].methods.len
-  myVt[].methods.add m.name
-  myVt[].signatureToIndex[sig] = idx
+  # see if this is an override: the table of `m.cls` has its ancestors' as well,
+  # see `processMethods`.
+  setMethod c.vtables.getOrQuit(m.cls), sig, m.name
 
 proc processMethods(c: var Context) =
   # Methods are fundamentally different from other type-bound symbols in
@@ -690,18 +821,15 @@ proc processMethods(c: var Context) =
         if m.cls == cls:
           var methodName = pool.syms[m.name]
           extractBasename methodName
+          # The hooks the lifter writes are named for their type, and still are
+          # overrides of each other: the frontend files them under this name too.
+          if isHookNamed(methodName, "=destroy"): methodName = "=destroy"
+          elif isHookNamed(methodName, "=trace"): methodName = "=trace"
           processMethod c, m, methodName
       # Also load methods from the frontend pragmas (for imported generic instances)
       let diff = vtables_frontend.loadVTable(cls)
       for entry in diff:
-        let sig = pool.strings[entry.signature]
-        let vt = addr c.vtables.getOrQuit(cls)
-        let idx = vt[].signatureToIndex.getOrDefault(sig, -1)
-        if idx == -1:
-          vt[].methods.add entry.fn
-          vt[].signatureToIndex[sig] = vt[].methods.len - 1
-        else:
-          vt[].methods[idx] = entry.fn
+        setMethod c.vtables.getOrQuit(cls), pool.strings[entry.signature], entry.fn
 
 proc registerClass(c: var Context; cls: SymId; inThisModule: bool) =
   for i in 0 ..< c.classes.len:
@@ -738,7 +866,11 @@ proc collectClass(c: var Context; n: var Cursor) =
     for i in 0 ..< deps.len:
       registerClass c, deps[i], false
     deps.add cls # add `self` for the display
-    c.vtables[cls] = VTable(display: ensureMove deps, methods: @[], parent: firstDep, state: Mine)
+    var own = rootVTable()
+    own.display = ensureMove deps
+    own.parent = firstDep
+    own.state = Mine
+    c.vtables[cls] = ensureMove own
     registerClass c, cls, true
 
 proc collectMethods(c: var Context; n: var Cursor) =
@@ -836,7 +968,10 @@ proc emitVTables(c: var Context; dest: var TokenBuf) =
           for m in vtab.methods:
             dest.copyIntoKind CastX, NoLineInfo:
               dest.addParPair PointerT, NoLineInfo
-              dest.addSymUse m, NoLineInfo
+              if m == SymId(0):
+                dest.addParPair NilX, NoLineInfo
+              else:
+                dest.addSymUse m, NoLineInfo
           dest.addParRi() # AconstrX
         else:
           # flexible array needs at least one element:
@@ -851,7 +986,8 @@ proc transformVTables*(pass: var Pass; needsXelim: var bool) =
     typeCache: createTypeCache(),
     moduleSuffix: pass.moduleSuffix,
     needsXelim: needsXelim,
-    getRttiSym: pool.syms.getOrIncl("getRtti.0." & SystemModuleSuffix)
+    getRttiSym: pool.syms.getOrIncl("getRtti.0." & SystemModuleSuffix),
+    deallocSym: pool.syms.getOrIncl("deallocFixed.0." & SystemModuleSuffix)
   )
   c.typeCache.openScope()
 

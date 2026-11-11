@@ -1,0 +1,22 @@
+block true
+anon 2
+for 10
+for 11
+while 3
+while 6
+if 7
+elif 8
+case 9
+try 11
+finally 12
+nested 3 100
+global 6 7
+global after 6
+break 2
+when 3 4
+when after 3
+ginit 42
+kept
+kept
+iter 5
+iter 5

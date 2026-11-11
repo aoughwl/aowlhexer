@@ -62,6 +62,30 @@ type
 
 # -------------- helpers ----------------------------------------
 
+proc peelToLocation(c: var Context; n: Cursor; didPeel: var bool): Cursor =
+  ## The location under any conversions of `n`, as a move out of `Base(x)` zeroes
+  ## `x`. A conversion of a `ref` up to its base is a `baseobj` too; one of an
+  ## object is a slice, a part of the location, and stays.
+  result = n
+  while true:
+    if result.exprKind in ConvKinds:
+      inc result
+      skip result # the target type
+      didPeel = true
+    elif result.exprKind == BaseobjX:
+      var inner = result
+      inc inner
+      skip inner # the target type
+      skip inner # the inheritance depth
+      let t = toTypeImpl(getType(c.typeCache, inner))
+      if t.typeKind in {RefT, PtrT}:
+        result = inner
+        didPeel = true
+      else:
+        break
+    else:
+      break
+
 proc isLastRead(c: var Context; n: Cursor): bool =
   # This is a hack to make sure that the type cache is populated for the
   # expression we are analysing:
@@ -77,7 +101,7 @@ proc isLastRead(c: var Context; n: Cursor): bool =
   result = false
   # A closure made from an environment co-owns it while the routine still works on
   # it, so it is never a move out of the local.
-  if r != NoSymId and r != pool.syms.getOrIncl(EnvLocalName):
+  if r != NoSymId and not isEnvLocal(r):
     var canAnalyse = false
     let v = c.typeCache.getLocalInfo(r)
     if v.kind == ParamY:
@@ -94,7 +118,11 @@ proc isLastRead(c: var Context; n: Cursor): bool =
       canAnalyse = false
     if canAnalyse:
       var otherUsage = NoLineInfo
-      result = isLastUse(n, c.source[], otherUsage, c.mover)
+      # The control flow knows the location, not a conversion of it: asking about
+      # the conversion found no use at all, which says "last".
+      var didPeel = false
+      let loc = peelToLocation(c, n, didPeel)
+      result = isLastUse(loc, c.source[], otherUsage, c.mover)
       if ReportLastUse in c.flags:
         echo infoToStr(n.info), " LastUse: ", result
 
@@ -435,10 +463,9 @@ proc callWasMoved(c: var Context; arg: Cursor; typ: Cursor) =
   # location we are zeroing is the (pre-conversion) source: re-derive the type
   # from the peeled cursor.
   var hookTyp = typ
-  if n.exprKind in ConvKinds:
-    while n.exprKind in ConvKinds:
-      inc n
-      skip n  # skip the target type
+  var didPeel = false
+  n = peelToLocation(c, n, didPeel)
+  if didPeel:
     hookTyp = getType(c.typeCache, n)
 
   let info = n.info
@@ -1024,12 +1051,17 @@ proc genLastRead(c: var Context; n: var Cursor; typ: Cursor)
 
   c.dest.addParRi() # finish the VarDecl
 
-  let hookProc = getHook(c.lifter[], attachedWasMoved, typ, info)
+  # What moved is the location under any conversion: `Base(local)` as a last read
+  # is moved from `local`, which is what must be zeroed, by the hook of its type.
+  var didPeel = false
+  let loc = peelToLocation(c, ex, didPeel)
+  let hookTyp = if didPeel: getType(c.typeCache, loc) else: typ
+  let hookProc = getHook(c.lifter[], attachedWasMoved, hookTyp, info)
   if hookProc != NoSymId:
     copyIntoKind c.dest, CallS, info:
       copyIntoSymUse c.dest, hookProc, info
       copyIntoKind c.dest, HaddrX, info:
-        copyTree c.dest, ex
+        copyTree c.dest, loc
 
   c.dest.addParRi() # finish the StmtList
   c.dest.copyIntoSymUse ow.s, ow.info

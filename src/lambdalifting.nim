@@ -40,6 +40,12 @@ activation has its own. A routine has just one parameter for an environment, so
 one that creates an environment and also reaches further out keeps the parameter
 in it: see `genObjectTypes`.
 
+A local declared in the body of a loop is a new variable on every iteration, like
+every `let` says, so a closure made in one iteration keeps that iteration's value:
+such a body is a level of its own here, with an environment made as it is entered.
+It is a "routine" on `procStack` called a loop scope, except that its code is in
+the routine around it, whose locals it reaches directly. See `trWhile`.
+
 ]##
 
 import std / [assertions, sets, tables, hashes, syncio]
@@ -90,6 +96,10 @@ type
       ## (user, used): a routine mentions a nested routine.
     envUp: Table[SymId, SymId]
       ## env type -> its link to the environment of the enclosing routine.
+    loopScopes: HashSet[SymId]
+      ## The entries of `procStack` that are the body of a loop, not a routine.
+    loopEnvLocal: Table[SymId, SymId]
+      ## loop scope -> the local holding its environment.
     localToEnv: Table[SymId, EnvField]
     env: CurrentEnv
     hasClosures: bool
@@ -121,6 +131,90 @@ proc isClosureIterDecl(n: Cursor): bool =
   for _ in 0..<ProcPragmasPos:
     skip m
   hasPragma(m, ClosureP)
+
+proc isRoutineDecl(n: Cursor): bool =
+  n.stmtKind in {ProcS, FuncS, MethodS, ConverterS, IteratorS, MacroS, TemplateS} and
+    n.firstSon.kind == SymbolDef
+
+proc scanCapture(n: var Cursor; depth: int; onlyDirect: bool; decls, own: var HashSet[SymId]; found: var bool) =
+  ## Is a local declared outside of every routine used inside of one? With
+  ## `onlyDirect` only the locals that are direct sons of the tree being asked about
+  ## count: the others can be left to the statement around them.
+  case n.kind
+  of Symbol:
+    if depth > 0 and decls.contains(n.symId) and not own.contains(n.symId):
+      found = true
+    inc n
+  of ParLe:
+    if depth > 0 and n.substructureKind == ParamU and n.firstSon.kind == SymbolDef:
+      own.incl n.firstSon.symId
+    if isRoutineDecl(n):
+      var inner = initHashSet[SymId]()
+      inc n
+      while n.hasMore:
+        scanCapture n, depth + 1, onlyDirect, decls, inner, found
+      inc n
+    elif n.stmtKind in {VarS, LetS, CursorS, PatternvarS, ResultS, GvarS, GletS, TvarS, TletS}:
+      let isPlain = n.stmtKind in {VarS, LetS, CursorS, PatternvarS, ResultS}
+      let s = n.firstSon
+      if s.kind == SymbolDef:
+        if depth > 0:
+          own.incl s.symId
+        elif isPlain and not onlyDirect:
+          decls.incl s.symId
+      inc n
+      while n.hasMore:
+        scanCapture n, depth, onlyDirect, decls, own, found
+      inc n
+    else:
+      inc n
+      while n.hasMore:
+        scanCapture n, depth, onlyDirect, decls, own, found
+      inc n
+  else:
+    inc n
+
+proc capturesToplevelLocal(n: Cursor): bool =
+  var n = n
+  var decls = initHashSet[SymId]()
+  var own = initHashSet[SymId]()
+  result = false
+  scanCapture n, 0, false, decls, own, result
+
+proc trWhile(c: var Context; dest: var TokenBuf; n: var Cursor) =
+  ## Pass 1 of a loop, a `while` or the `corofor` of a closure iterator. A body with
+  ## locals that a routine captures gets a loop scope, named for pass 2 in a
+  ## `(comment <scope>)` at the start of the body.
+  copyInto dest, n:
+    tr c, dest, n # condition, or the iterator's call
+    var blockClose = false
+    if n.stmtKind == BlockS:
+      # the body of a `corofor` is a block around the statements
+      dest.takeToken n
+      dest.takeTree n # label
+      blockClose = true
+    if c.procStack.len > 0 and n.stmtKind == StmtsS and capturesToplevelLocal(n):
+      let scope = pool.syms.getOrIncl("`lscope." & $c.counter & "." & c.thisModuleSuffix)
+      inc c.counter
+      c.hasClosures = true
+      c.loopScopes.incl scope
+      c.procParent[scope] = c.procStack[c.procStack.len-1]
+      c.procStack.add scope
+      let info = n.info
+      dest.add n
+      inc n
+      dest.copyIntoKind CommentS, info:
+        dest.addSymUse scope, info
+      while n.hasMore:
+        tr c, dest, n
+      dest.takeParRi n
+      discard c.procStack.pop()
+    if blockClose:
+      while n.hasMore:
+        tr c, dest, n
+      dest.takeParRi n
+    while n.hasMore:
+      tr c, dest, n
 
 proc trSons(c: var Context; dest: var TokenBuf; n: var Cursor) =
   copyInto dest, n:
@@ -273,7 +367,18 @@ proc tr(c: var Context; dest: var TokenBuf; n: var Cursor) =
     if loc.kind in {ParamY, LetY, VarY, ResultY}:
       let declaredAt = c.declDepth.getOrDefault(n.symId, -1)
       let cross = if declaredAt < 0: 0 else: c.procStack.len - declaredAt
-      if cross > 0:
+      # Loop scopes are in the routine around them: only a routine is a capture.
+      var crossesRoutine = false
+      for i in max(0, c.procStack.len - cross) ..< c.procStack.len:
+        if not c.loopScopes.contains(c.procStack[i]):
+          crossesRoutine = true
+      if crossesRoutine:
+        if declaredAt == 0:
+          # No routine owns it, so no environment can hold it: `hoistToplevel` is
+          # there so that this does not happen. Going on would give the routine an
+          # environment of its own, with a zeroed copy of the local.
+          quit "Error: cannot capture `" & pool.syms[n.symId] & "`, a local of module-level code, at " &
+            infoToStr(n.info)
         for i in max(0, c.procStack.len - cross) ..< c.procStack.len:
           c.closureProcs.incl(c.procStack[i])
           c.capturers.incl(c.procStack[i])
@@ -358,7 +463,11 @@ proc tr(c: var Context; dest: var TokenBuf; n: var Cursor) =
       c.typeCache.openScope()
       trSons(c, dest, n)
       c.typeCache.closeScope()
-    of CallS, CmdS, BlockS, AsgnS, IfS, WhenS, WhileS, CoroforS,
+    of WhileS:
+      trWhile c, dest, n
+    of CoroforS:
+      trWhile c, dest, n
+    of CallS, CmdS, BlockS, AsgnS, IfS, WhenS,
       CaseS, RetS, YldS, StmtsS, PragmaxS, InclS, ExclS, ImportasS,
       ExportexceptS, DiscardS, TryS, RaiseS, UnpackdeclS,
       AssumeS, AssertS, CallstrlitS, InfixS, PrefixS, HcallS,
@@ -553,6 +662,38 @@ proc emitChildEnv(c: var Context; dest: var TokenBuf; info: PackedLineInfo; i: i
     untypedEnv dest, info, c.env,
       (if not c.env.needsHeap and c.env.mode == EnvIsLocal: WantAddr else: WantValue)
 
+proc emitLocalSlot(c: var Context; dest: var TokenBuf; local: SymId; info: PackedLineInfo): bool =
+  ## Emits the access to the slot of a local of the routine being lowered, from its
+  ## code or a loop scope in it, if the local has one.
+  result = false
+  if not c.capturedSyms.contains(local): return
+  var i = c.procStack.len - 1
+  while i >= 0:
+    let s = c.procStack[i]
+    let fld = c.localToEnv.getOrDefault(envKey(s, local))
+    if fld.field != SymId(0):
+      dest.copyIntoKind DotX, info:
+        if i == c.procStack.len - 1:
+          # For a stack environment `typedEnv` is the object itself: only a heap
+          # one is dereferenced.
+          if c.env.needsHeap:
+            dest.copyIntoKind DerefX, info:
+              dest.typedEnv info, c.env
+          else:
+            dest.typedEnv info, c.env
+        else:
+          let holder = if c.loopScopes.contains(s): c.loopEnvLocal.getOrDefault(s)
+                       else: pool.syms.getOrIncl(EnvLocalName)
+          if c.env.needsHeap:
+            dest.copyIntoKind DerefX, info:
+              dest.addSymUse holder, info
+          else:
+            dest.addSymUse holder, info
+        dest.addSymUse fld.field, info
+      return true
+    if not c.loopScopes.contains(s): return
+    dec i
+
 proc emitEnvFor(c: var Context; dest: var TokenBuf; info: PackedLineInfo; target: SymId)
   {.ensuresNif: addedExpr(dest).} =
   ## The environment to hand to the routine `target`, from wherever it is used.
@@ -619,6 +760,9 @@ proc transformClosureIter(c: var Context; dest: var TokenBuf; n: var Cursor) =
   swap c.coroCtx.typeCache, c.typeCache
   coro_transform.transformCoroutineDecl(c.coroCtx, dest, n)
   swap c.coroCtx.typeCache, c.typeCache
+
+proc treLoopBody(c: var Context; dest: var TokenBuf; n: var Cursor)
+  {.ensuresNif: addedAny(dest).}
 
 proc isClosureCoroFor(c: var Context; n: Cursor): bool =
   ## Peek at a `(corofor (call <target> …) …)` to decide whether this
@@ -779,7 +923,7 @@ proc trClosureCoroFor(c: var Context; dest: var TokenBuf; n: var Cursor) =
 
   coro_transform.emitWhileBegin(dest, info, itSym, myEnvSym)
   while n.hasMore:
-    tre(c, dest, n)
+    treLoopBody(c, dest, n)
   coro_transform.emitWhileEnd(dest, info, itSym)
 
   skipParRi n # close (corofor
@@ -978,6 +1122,57 @@ proc treParams(c: var Context; dest, init: var TokenBuf; n: var Cursor; doAddEnv
     if doAddEnvParam:
       addEnvParam dest, n.info, envTyp
 
+proc emitEnvLocal(c: var Context; dest: var TokenBuf; envTyp: SymId; needsHeap: bool; up: TokenBuf) =
+  ## The local `c.env` names: the environment, with its link out set to `up`.
+  dest.copyIntoKind VarS, NoLineInfo:
+    dest.addSymDef c.env.s, NoLineInfo
+    dest.addDotToken() # no export marker
+    dest.addDotToken() # no pragmas
+    if needsHeap:
+      dest.copyIntoKind RefT, NoLineInfo:
+        dest.addSymUse c.env.typ, NoLineInfo
+      dest.copyIntoKind NewobjX, NoLineInfo:
+        dest.copyIntoKind RefT, NoLineInfo:
+          dest.addSymUse c.env.typ, NoLineInfo
+    else:
+      dest.addSymUse c.env.typ, NoLineInfo
+      dest.addDotToken() # no default value
+  if needsHeap:
+    # Note: If the environment is on the stack, a single `wasMoved`
+    # hook will be generated for it so we don't need to do anything here.
+    # Otherwise, we need to init the environment via the `=wasMoved` hooks:
+    for _, field in c.localToEnv:
+      # A view (a `for` variable over a seq, say) is a pointer, with no hook.
+      if field.objType == c.env.typ and field.typ.typeKind notin {LentT, MutT, OutT}:
+        dest.copyIntoKind WasmovedX, NoLineInfo:
+          dest.copyIntoKind HaddrX, NoLineInfo:
+            dest.copyIntoKind DotX, NoLineInfo:
+              if needsHeap:
+                dest.copyIntoKind DerefX, NoLineInfo:
+                  dest.addSymUse c.env.s, NoLineInfo
+              else:
+                dest.addSymUse c.env.s, NoLineInfo
+              dest.addSymUse field.field, NoLineInfo
+    if c.envUp.getOrDefault(envTyp) != SymId(0):
+      dest.copyIntoKind WasmovedX, NoLineInfo:
+        dest.copyIntoKind HaddrX, NoLineInfo:
+          dest.copyIntoKind DotX, NoLineInfo:
+            dest.copyIntoKind DerefX, NoLineInfo:
+              dest.addSymUse c.env.s, NoLineInfo
+            dest.addSymUse c.envUp.getOrDefault(envTyp), NoLineInfo
+  # Keep the environment this routine was given: the routines nested in
+  # this one reach the enclosing routines' locals through it.
+  if c.envUp.getOrDefault(envTyp) != SymId(0):
+    dest.copyIntoKind AsgnS, NoLineInfo:
+      dest.copyIntoKind DotX, NoLineInfo:
+        if needsHeap:
+          dest.copyIntoKind DerefX, NoLineInfo:
+            dest.addSymUse c.env.s, NoLineInfo
+        else:
+          dest.addSymUse c.env.s, NoLineInfo
+        dest.addSymUse c.envUp.getOrDefault(envTyp), NoLineInfo
+      dest.copyTree up
+
 proc treProcBody(c: var Context; dest, init: var TokenBuf; n: var Cursor; sym: SymId; needsHeap: bool) =
   if n.stmtKind == StmtsS:
     copyInto dest, n:
@@ -985,55 +1180,9 @@ proc treProcBody(c: var Context; dest, init: var TokenBuf; n: var Cursor; sym: S
       if c.createsEnv.contains(sym):
         let envTyp = c.envTypeForProc(sym)
         c.env = CurrentEnv(s: pool.syms.getOrIncl(EnvLocalName), mode: EnvIsLocal, typ: envTyp, needsHeap: needsHeap)
-        dest.copyIntoKind VarS, NoLineInfo:
-          dest.addSymDef c.env.s, NoLineInfo
-          dest.addDotToken() # no export marker
-          dest.addDotToken() # no pragmas
-          if needsHeap:
-            dest.copyIntoKind RefT, NoLineInfo:
-              dest.addSymUse c.env.typ, NoLineInfo
-            dest.copyIntoKind NewobjX, NoLineInfo:
-              dest.copyIntoKind RefT, NoLineInfo:
-                dest.addSymUse c.env.typ, NoLineInfo
-          else:
-            dest.addSymUse c.env.typ, NoLineInfo
-            dest.addDotToken() # no default value
-        if needsHeap:
-          # Note: If the environment is on the stack, a single `wasMoved`
-          # hook will be generated for it so we don't need to do anything here.
-          # Otherwise, we need to init the environment via the `=wasMoved` hooks:
-          for _, field in c.localToEnv:
-            # A view (a `for` variable over a seq, say) is a pointer, with no hook.
-            if field.objType == c.env.typ and field.typ.typeKind notin {LentT, MutT, OutT}:
-              dest.copyIntoKind WasmovedX, NoLineInfo:
-                dest.copyIntoKind HaddrX, NoLineInfo:
-                  dest.copyIntoKind DotX, NoLineInfo:
-                    if needsHeap:
-                      dest.copyIntoKind DerefX, NoLineInfo:
-                        dest.addSymUse c.env.s, NoLineInfo
-                    else:
-                      dest.addSymUse c.env.s, NoLineInfo
-                    dest.addSymUse field.field, NoLineInfo
-          if c.envUp.getOrDefault(envTyp) != SymId(0):
-            dest.copyIntoKind WasmovedX, NoLineInfo:
-              dest.copyIntoKind HaddrX, NoLineInfo:
-                dest.copyIntoKind DotX, NoLineInfo:
-                  dest.copyIntoKind DerefX, NoLineInfo:
-                    dest.addSymUse c.env.s, NoLineInfo
-                  dest.addSymUse c.envUp.getOrDefault(envTyp), NoLineInfo
-        # Keep the environment this routine was given: the routines nested in
-        # this one reach the enclosing routines' locals through it.
-        if c.envUp.getOrDefault(envTyp) != SymId(0):
-          dest.copyIntoKind AsgnS, NoLineInfo:
-            dest.copyIntoKind DotX, NoLineInfo:
-              if needsHeap:
-                dest.copyIntoKind DerefX, NoLineInfo:
-                  dest.addSymUse c.env.s, NoLineInfo
-              else:
-                dest.addSymUse c.env.s, NoLineInfo
-              dest.addSymUse c.envUp.getOrDefault(envTyp), NoLineInfo
-            dest.addSymUse pool.syms.getOrIncl(EnvParamName), NoLineInfo
-
+        var up = createTokenBuf(1)
+        up.addSymUse pool.syms.getOrIncl(EnvParamName), NoLineInfo
+        emitEnvLocal c, dest, envTyp, needsHeap, up
       elif c.closureProcs.contains(sym):
         c.env = CurrentEnv(s: pool.syms.getOrIncl(EnvParamName), mode: EnvIsParam, typ: c.envTypeForProc(sym), needsHeap: needsHeap)
       else:
@@ -1046,6 +1195,60 @@ proc treProcBody(c: var Context; dest, init: var TokenBuf; n: var Cursor; sym: S
       c.env.needsHeap = c.env.needsHeap or needsHeapB
   else:
     tre(c, dest, n)
+
+proc treLoopBody(c: var Context; dest: var TokenBuf; n: var Cursor) =
+  ## Pass 2 of a loop's body, see `trWhile`. The environment of a loop scope is made
+  ## as the body is entered, and a closure made in the body takes that one.
+  if n.stmtKind == BlockS and n.firstSon.kind in {SymbolDef, DotToken}:
+    var inner = n.firstSon
+    skip inner
+    if inner.stmtKind == StmtsS and inner.firstSon.stmtKind == CommentS:
+      dest.takeToken n # block
+      dest.takeTree n # label
+      treLoopBody c, dest, n
+      dest.takeParRi n
+      return
+  var scope = SymId(0)
+  if n.stmtKind == StmtsS:
+    let first = n.firstSon
+    if first.stmtKind == CommentS:
+      var m = first
+      inc m
+      if m.kind == Symbol and c.loopScopes.contains(m.symId):
+        scope = m.symId
+  if scope == SymId(0):
+    tre c, dest, n
+  else:
+    dest.add n
+    inc n
+    skip n # the marker
+    let oldEnv = c.env
+    let info = n.info
+    c.procStack.add scope
+    if c.createsEnv.contains(scope):
+      let envTyp = c.envTypeForProc(scope)
+      let holder = pool.syms.getOrIncl("`el." & $(c.counter + 1))
+      inc c.counter
+      c.loopEnvLocal[scope] = holder
+      var up = createTokenBuf(4)
+      if oldEnv.s == SymId(0):
+        up.addParPair NilX, info
+      else:
+        untypedEnv up, info, oldEnv,
+          (if not oldEnv.needsHeap and oldEnv.mode == EnvIsLocal: WantAddr else: WantValue)
+      c.env = CurrentEnv(s: holder, mode: EnvIsLocal, typ: envTyp, needsHeap: oldEnv.needsHeap)
+      emitEnvLocal c, dest, envTyp, oldEnv.needsHeap, up
+    while n.hasMore:
+      tre c, dest, n
+    c.env = oldEnv
+    discard c.procStack.pop()
+    dest.takeParRi n
+
+proc treWhile(c: var Context; dest: var TokenBuf; n: var Cursor) =
+  copyInto dest, n:
+    tre c, dest, n # condition, or the iterator's call
+    while n.hasMore:
+      treLoopBody c, dest, n
 
 proc signatureMentionsClosure(decl: Cursor): bool =
   ## Does this routine's PARAMS or RETURN TYPE mention a `.closure` routine
@@ -1495,19 +1698,7 @@ proc tre(c: var Context; dest: var TokenBuf; n: var Cursor) =
         emitEnvFor c, dest, info, n.symId
       inc n
     else:
-      let repWith = c.envField(n.symId)
-      if repWith.field != SymId(0):
-        # For stack-env local (`!needsHeap` + `EnvIsLocal`), `typedEnv`
-        # returns the env OBJECT directly — deref-ing it is a type
-        # error NIFC rejects. Mirror `treLocal`'s branch: only deref
-        # when the env is heap-ref-shaped.
-        dest.copyIntoKind DotX, info:
-          if c.env.needsHeap:
-            dest.copyIntoKind DerefX, info:
-              dest.typedEnv info, c.env
-          else:
-            dest.typedEnv info, c.env
-          dest.addSymUse repWith.field, info
+      if emitLocalSlot(c, dest, n.symId, info):
         inc n
       else:
         takeTree dest, n
@@ -1544,17 +1735,10 @@ proc tre(c: var Context; dest: var TokenBuf; n: var Cursor) =
       if value.kind == Symbol and c.keptResults.contains(value.symId):
         let info = n.info
         let name = value.symId
-        let fld = c.envField(name)
         dest.copyIntoKind StmtsS, info:
           dest.copyIntoKind AsgnS, info:
             dest.addSymUse name, info
-            dest.copyIntoKind DotX, info:
-              if c.env.needsHeap:
-                dest.copyIntoKind DerefX, info:
-                  dest.typedEnv info, c.env
-              else:
-                dest.typedEnv info, c.env
-              dest.addSymUse fld.field, info
+            discard emitLocalSlot(c, dest, name, info)
           dest.copyIntoKind RetS, info:
             dest.addSymUse name, info
         skip n
@@ -1577,8 +1761,10 @@ proc tre(c: var Context; dest: var TokenBuf; n: var Cursor) =
       if isClosureCoroFor(c, n):
         trClosureCoroFor c, dest, n
       else:
-        treSons(c, dest, n)
-    of CallS, CmdS, BlockS, AsgnS, IfS, WhenS, WhileS,
+        treWhile c, dest, n
+    of WhileS:
+      treWhile c, dest, n
+    of CallS, CmdS, BlockS, AsgnS, IfS, WhenS,
       CaseS, YldS, StmtsS, PragmaxS, InclS, ExclS, ImportasS,
       ExportexceptS, DiscardS, TryS, RaiseS, UnpackdeclS,
       AssumeS, AssertS, CallstrlitS, InfixS, PrefixS, HcallS,
@@ -1866,6 +2052,171 @@ proc sweepClosures(c: var Context; n: Cursor; found: var bool) =
       inc n
     if nested <= 0: break
 
+proc capturesDirectLocal(n: Cursor): bool =
+  ## `n` is a `stmts`: is one of the locals that are its direct sons captured? They
+  ## are then in the scope of all of its sons, and it can be hoisted only as a whole.
+  var decls = initHashSet[SymId]()
+  var it = n
+  inc it
+  while it.hasMore:
+    if it.stmtKind in {VarS, LetS, CursorS, PatternvarS}:
+      let s = it.firstSon
+      if s.kind == SymbolDef: decls.incl s.symId
+    skip it
+  result = false
+  if decls.len > 0:
+    var own = initHashSet[SymId]()
+    var m = n
+    scanCapture m, 0, true, decls, own, result
+
+proc hoistedName(c: var Context): SymId =
+  result = pool.syms.getOrIncl("`modscope." & $c.counter & "." & c.thisModuleSuffix)
+  inc c.counter
+
+proc addHoistedProcHead(dest: var TokenBuf; name: SymId; retType: Cursor; info: PackedLineInfo) =
+  dest.addSymDef name, info
+  dest.addDotToken() # no export marker
+  dest.addDotToken() # no pattern
+  dest.addDotToken() # no generic params
+  dest.copyIntoKind ParamsU, info: discard
+  if cursorIsNil(retType):
+    dest.addDotToken()
+  else:
+    dest.addSubtree retType
+  dest.copyIntoKind PragmasU, info: discard
+  dest.addDotToken() # no effects
+
+proc copyUngloballed(dest, globals: var TokenBuf; n: var Cursor; depth: int) =
+  ## Copies module-level code to be the body of a routine. Its globals must not
+  ## become statics of that routine: the rest of the module names them. So the
+  ## declarations go to `globals` and leave an assignment here.
+  if n.kind != ParLe:
+    dest.takeToken n
+  elif depth == 0 and n.stmtKind in {GvarS, GletS, TvarS, TletS}:
+    let info = n.info
+    let tag = n
+    inc n
+    let name = n.symId
+    globals.add tag
+    globals.takeTree n # name
+    globals.takeTree n # export marker
+    globals.takeTree n # pragmas
+    globals.takeTree n # type
+    globals.addDotToken()
+    globals.addParRi()
+    if n.kind == DotToken:
+      inc n
+    else:
+      dest.copyIntoKind AsgnS, info:
+        dest.addSymUse name, info
+        dest.takeTree n
+    skipParRi n
+  else:
+    let d = if isRoutineDecl(n): depth + 1 else: depth
+    dest.takeToken n
+    while n.hasMore:
+      copyUngloballed dest, globals, n, d
+    dest.takeParRi n
+
+proc hoistToplevel(c: var Context; dest: var TokenBuf; n: var Cursor) =
+  ## Module-level code has locals too: the ones in a `block`, `for`, `while`, `if`,
+  ## `try`, `case` around them. A closure over one needs an environment in a routine
+  ##  to live in, and none is around. The statement becomes the body of a routine of
+  ## its own, called in its place: from there on it is what the same code in a
+  ## routine is, including where the locals die.
+  ##
+  ##   block:                    proc `modscope.0() =
+  ##     var seen = false   ==>    block:
+  ##     ...                         ...
+  ##                             `modscope.0()
+  let info = n.info
+  let name = hoistedName(c)
+  var globals = createTokenBuf(16)
+  globals.addParLe StmtsS, info
+  var decl = createTokenBuf(64)
+  decl.copyIntoKind ProcS, info:
+    addHoistedProcHead decl, name, default(Cursor), info
+    decl.copyIntoKind StmtsS, info:
+      copyUngloballed decl, globals, n, 0
+  var sig = createTokenBuf(16)
+  sig.copyIntoKind ProcS, info:
+    addHoistedProcHead sig, name, default(Cursor), info
+    sig.addDotToken()
+  programs.publish name, sig, SemcheckSignatures
+  globals.addParRi()
+  if globals.len > 2:
+    var g = beginRead(globals)
+    tr c, dest, g
+    endRead(globals)
+  var m = beginRead(decl)
+  trProc c, dest, m
+  endRead(decl)
+  dest.copyIntoKind CallS, info:
+    dest.addSymUse name, info
+
+proc hoistGlobalInit(c: var Context; dest: var TokenBuf; n: var Cursor) =
+  ## `let g = (block: ...)`: the value is hoisted, the global stays.
+  ##
+  ##   glet g = `modscope.0()   with   proc `modscope.0(): T = result = (block: ...)
+  let info = n.info
+  let name = hoistedName(c)
+  let tag = n
+  inc n
+  var head = createTokenBuf(16)
+  head.add tag
+  head.takeTree n # name
+  head.takeTree n # export marker
+  head.takeTree n # pragmas
+  let typ = n
+  head.takeTree n # type
+  let res = pool.syms.getOrIncl("`modres." & $c.counter)
+  inc c.counter
+  var decl = createTokenBuf(64)
+  decl.copyIntoKind ProcS, info:
+    addHoistedProcHead decl, name, typ, info
+    decl.copyIntoKind StmtsS, info:
+      decl.copyIntoKind ResultS, info:
+        decl.addSymDef res, info
+        decl.addDotToken()
+        decl.addDotToken()
+        decl.addSubtree typ
+        decl.addDotToken()
+      decl.copyIntoKind AsgnS, info:
+        decl.addSymUse res, info
+        decl.takeTree n
+      decl.copyIntoKind RetS, info:
+        decl.addSymUse res, info
+  skipParRi n
+  var sig = createTokenBuf(16)
+  sig.copyIntoKind ProcS, info:
+    addHoistedProcHead sig, name, typ, info
+    sig.addDotToken()
+  programs.publish name, sig, SemcheckSignatures
+  var m = beginRead(decl)
+  trProc c, dest, m
+  endRead(decl)
+  head.copyIntoKind CallS, info:
+    head.addSymUse name, info
+  head.addParRi()
+  var h = beginRead(head)
+  tr c, dest, h
+  endRead(head)
+
+proc trToplevel(c: var Context; dest: var TokenBuf; n: var Cursor) =
+  if n.kind == ParLe and n.stmtKind == StmtsS:
+    if capturesDirectLocal(n):
+      hoistToplevel c, dest, n
+    else:
+      copyInto dest, n:
+        while n.hasMore:
+          trToplevel c, dest, n
+  elif n.kind == ParLe and n.stmtKind in {GvarS, GletS, TvarS, TletS} and capturesToplevelLocal(n):
+    hoistGlobalInit c, dest, n
+  elif n.kind == ParLe and not isRoutineDecl(n) and n.stmtKind != TypeS and capturesToplevelLocal(n):
+    hoistToplevel c, dest, n
+  else:
+    tr c, dest, n
+
 proc elimLambdas*(pass: var Pass) =
   var n = pass.n  # Extract cursor locally
   var c = Context(counter: 0, typeCache: createTypeCache(), thisModuleSuffix: pass.moduleSuffix)
@@ -1883,7 +2234,9 @@ proc elimLambdas*(pass: var Pass) =
   var reachesClosure = false
   sweepClosures c, n, reachesClosure
   if reachesClosure: c.hasClosures = true
-  tr c, pass.dest, n
+  copyInto pass.dest, n:
+    while n.hasMore:
+      trToplevel c, pass.dest, n
   propagateCapturers c
   c.typeCache.closeScope()
 
