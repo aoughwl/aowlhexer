@@ -350,8 +350,19 @@ proc inlineLoopBody(e: var EContext; dest: var TokenBuf; c: var Cursor; mapping:
       inc c
       inlineLoopBody(e, dest, c, mapping)
       e.breaks.add SymId(0)
-      e.continues.add SymId(0)
+      # `continue` has no form after this pass: it leaves the body, a block of its
+      # own, as `transformLoopBody` does for a loop met in the open.
+      var contLab = SymId(0)
+      if hasContinueStmt(c):
+        contLab = pool.syms.getOrIncl("continueLabel." & $getTmpId(e))
+        dest.add tagToken($BlockS, c.info)
+        dest.add symdefToken(contLab, c.info)
+        dest.add tagToken("stmts", c.info)
+      e.continues.add contLab
       inlineLoopBody(e, dest, c, mapping)
+      if contLab != SymId(0):
+        dest.addParRi() # stmts
+        dest.addParRi() # block
       takeParRi(dest, c)
       discard e.breaks.pop()
       discard e.continues.pop()
