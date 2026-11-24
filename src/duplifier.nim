@@ -36,7 +36,7 @@ include ".." / lib / nifprelude
 include ".." / lib / compat2
 import ".." / lib / [nifindexes, symparser, treemangler]
 import lifter, mover, hexer_context, passes
-import ".." / nimony / [nimony_model, programs, decls, typenav, renderer, reporters, builtintypes, typekeys]
+import ".." / nimony / [nimony_model, programs, decls, typenav, renderer, reporters, builtintypes, typekeys, typeprops]
 include ".." / nimony / nif_annotations
 
 type
