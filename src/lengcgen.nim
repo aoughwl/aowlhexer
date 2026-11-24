@@ -17,7 +17,7 @@ include ".." / lib / nifprelude
 include ".." / lib / compat2
 import ".." / lib / symparser
 import ".." / models / tags
-import ".." / nimony / [nimony_model, programs, typenav, expreval, xints, decls, builtintypes, typeprops, langmodes, typekeys, nifconfig]
+import ".." / model / [nimony_model, programs, typenav, expreval, xints, decls, builtintypes, typeprops, langmodes, typekeys, nifconfig]
 import hsizeof
 import hexer_context, pipeline, dce1, lifter
 import  ".." / lib / [stringtrees]

@@ -50,7 +50,7 @@ include ".." / lib / nifprelude
 include ".." / lib / compat2
 import ".." / lib / [nifindexes, symparser, treemangler]
 import passes
-import ".." / nimony / [nimony_model, programs, typenav, decls]
+import ".." / model / [nimony_model, programs, typenav, decls]
 import lifter
 
 const

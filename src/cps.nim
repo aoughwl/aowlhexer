@@ -64,9 +64,9 @@ when defined(nimony):
   {.feature: "lenientnils".}
 include ".." / lib / nifprelude
 include ".." / lib / compat2
-import ".." / nimony / [nimony_model, decls, programs, typenav, builtintypes, typeprops]
+import ".." / model / [nimony_model, decls, programs, typenav, builtintypes, typeprops]
 import passes
-include ".." / nimony / nif_annotations
+include ".." / model / nif_annotations
 import coro_transform
 
 # ---------------------------------------------------------------------

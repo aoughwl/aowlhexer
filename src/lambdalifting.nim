@@ -52,10 +52,10 @@ import std / [assertions, sets, tables, hashes, syncio]
 include ".." / lib / nifprelude
 include ".." / lib / compat2
 import ".." / lib / symparser
-import ".." / nimony / [nimony_model, decls, programs, typenav, expreval, xints, builtintypes, langmodes, renderer, reporters, typeprops]
+import ".." / model / [nimony_model, decls, programs, typenav, expreval, xints, builtintypes, langmodes, renderer, reporters, typeprops]
 import hsizeof
 import hexer_context, passes
-include ".." / nimony / nif_annotations
+include ".." / model / nif_annotations
 import coro_transform
 # Bring the iter-value tuple constants/helpers into scope as
 # unqualified names. `ResultParamName` / `CallerParamName` are the

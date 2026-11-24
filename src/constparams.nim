@@ -22,11 +22,11 @@ We also now do part of the exception handling transformations here:
 import std / [sets, tables, hashes, assertions, syncio]
 include ".." / lib / nifprelude
 include ".." / lib / compat2
-import ".." / nimony / [nimony_model, decls, programs, typenav, typeprops, builtintypes]
+import ".." / model / [nimony_model, decls, programs, typenav, typeprops, builtintypes]
 import hsizeof
 import ".." / models / tags
 import duplifier, eraiser, passes
-include ".." / nimony / nif_annotations
+include ".." / model / nif_annotations
 
 type
   Context = object

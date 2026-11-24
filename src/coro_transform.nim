@@ -38,11 +38,11 @@ when defined(nimony):
 include ".." / lib / nifprelude
 include ".." / lib / compat2
 import ".." / lib / symparser
-import ".." / nimony / [nimony_model, decls, programs, typenav, expreval, xints, builtintypes, langmodes, renderer, reporters, typeprops]
+import ".." / model / [nimony_model, decls, programs, typenav, expreval, xints, builtintypes, langmodes, renderer, reporters, typeprops]
 import hsizeof
 import ".." / njvl / [nj, njvl_model]
 import passes
-include ".." / nimony / nif_annotations
+include ".." / model / nif_annotations
 
 ## Note: `ContinuationName` lives in `builtintypes` (re-imported via the
 ## `nimony / [..., builtintypes, ...]` line above); we don't redefine it

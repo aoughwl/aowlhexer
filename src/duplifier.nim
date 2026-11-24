@@ -36,8 +36,8 @@ include ".." / lib / nifprelude
 include ".." / lib / compat2
 import ".." / lib / [nifindexes, symparser, treemangler]
 import lifter, mover, hexer_context, passes
-import ".." / nimony / [nimony_model, programs, decls, typenav, renderer, reporters, builtintypes, typekeys, typeprops]
-include ".." / nimony / nif_annotations
+import ".." / model / [nimony_model, programs, decls, typenav, renderer, reporters, builtintypes, typekeys, typeprops]
+include ".." / model / nif_annotations
 
 type
   ContextFlag = enum

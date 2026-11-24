@@ -19,7 +19,7 @@ include ".." / lib / compat2
 import ".." / lib / tinyhashes
 import ".." / lib / [nifindexes, symparser, treemangler]
 import passes
-import ".." / nimony / [nimony_model, decls, programs, typenav, renderer, builtintypes, typeprops, typekeys, vtables_frontend]
+import ".." / model / [nimony_model, decls, programs, typenav, renderer, builtintypes, typeprops, typekeys, vtables_frontend]
 from duplifier import constructsValue
 
 type

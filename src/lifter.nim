@@ -21,7 +21,7 @@ when defined(nimony):
 include ".." / lib / nifprelude
 include ".." / lib / compat2
 import ".." / lib / [nifindexes, symparser, treemangler]
-import ".." / nimony / [nimony_model, decls, programs, typenav, expreval, xints, builtintypes, typekeys, typeprops]
+import ".." / model / [nimony_model, decls, programs, typenav, expreval, xints, builtintypes, typekeys, typeprops]
 
 proc isMutFirstParam*(destroyProc: SymId): bool =
   result = false

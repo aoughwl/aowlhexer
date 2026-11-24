@@ -11,7 +11,7 @@ import std / [assertions, tables, hashes, sets, syncio]
 include ".." / lib / nifprelude
 include ".." / lib / compat2
 
-import ".." / nimony / [nimony_model, programs, decls, typeprops]
+import ".." / model / [nimony_model, programs, decls, typeprops]
 import hexer_context, iterinliner, desugar, xelim, duplifier, lifter, destroyer,
   constparams, vtables_backend, eraiser, lambdalifting, cps, passes,
   funcsummary, intramodinliner, arcopt
@@ -25,7 +25,7 @@ import hexer_context, iterinliner, desugar, xelim, duplifier, lifter, destroyer,
 # it has been removed in favour of this one.)
 when defined(verifyArc):
   import std / syncio
-  import ".." / nimony / verify_arc
+  import ".." / model / verify_arc
 
 proc publishHooks*(n: var Cursor) =
   case n.kind

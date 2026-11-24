@@ -3,7 +3,7 @@ include ".." / lib / nifprelude
 include ".." / lib / compat2
 import hexer_context
 import ".." / lib / symparser
-import ".." / nimony / [nimony_model, programs, decls, typenav]
+import ".." / model / [nimony_model, programs, decls, typenav]
 import duplifier
 
 

@@ -14,9 +14,9 @@
 import std / [assertions, syncio]
 include ".." / lib / nifprelude
 include ".." / lib / compat2
-import ".." / nimony / [nimony_model, decls, programs, typenav, typeprops, builtintypes]
+import ".." / model / [nimony_model, decls, programs, typenav, typeprops, builtintypes]
 import passes
-include ".." / nimony / nif_annotations
+include ".." / model / nif_annotations
 
 type
   Goal* = enum

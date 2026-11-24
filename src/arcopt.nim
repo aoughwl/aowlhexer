@@ -17,7 +17,7 @@ when defined(nimony):
   {.feature: "lenientnils".}
 include ".." / lib / nifprelude
 include ".." / lib / compat2
-import ".." / nimony / [nimony_model, programs]
+import ".." / model / [nimony_model, programs]
 from ".." / lengc / leng_model import takeProcDecl
 import ".." / lib / symparser
 import passes

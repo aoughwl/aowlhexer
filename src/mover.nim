@@ -12,7 +12,7 @@ import std / [assertions, intsets, syncio]
 
 include ".." / lib / nifprelude
 include ".." / lib / compat2
-import ".." / nimony / [nimony_model, decls, controlflow, programs]
+import ".." / model / [nimony_model, decls, controlflow, programs]
 
 type
   RootOfMode* = enum

@@ -9,10 +9,10 @@ import std / [assertions, tables, hashes, sets, syncio]
 from std / strutils import startsWith
 include ".." / lib / nifprelude
 include ".." / lib / compat2
-import ".." / nimony / [nimony_model, decls, programs, typenav, expreval, xints, builtintypes, langmodes, renderer, reporters]
+import ".." / model / [nimony_model, decls, programs, typenav, expreval, xints, builtintypes, langmodes, renderer, reporters]
 import hsizeof
 import hexer_context, passes
-include ".." / nimony / nif_annotations
+include ".." / model / nif_annotations
 
 type
   Context = object

@@ -89,3 +89,6 @@ incrementally onto an aowl core (dropping the `$NIMONY_SRC` dependency).
 ## License
 
 MIT (the vendored passes are © Andreas Rumpf, MIT, per nimony's license).
+
+## Library layout
+The passes import the typed model from `../model/` (repo `aowlmodel`) and the NIF layer from `../lib/` and `../models/` (repo `aowlnif`); stage them next to `hexer/` (see `aowlmony/tools/root/stage-linux-root.sh`).
