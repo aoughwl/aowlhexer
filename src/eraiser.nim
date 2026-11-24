@@ -35,7 +35,8 @@ import std / [sets, tables, hashes, assertions, syncio]
 
 include ".." / lib / nifprelude
 include ".." / lib / compat2
-import ".." / nimony / [nimony_model, decls, programs, typenav, typeprops]
+import ".." / nimony / [nimony_model, decls, programs, typenav, typeprops, reporters]
+import ".." / lib / lineinfos
 import hsizeof
 import ".." / models / tags
 import duplifier, passes
@@ -113,8 +114,20 @@ proc localsThatBecomeTuples*(n: Cursor): HashSet[SymId] =
   var hasRaisesPragma = false
   collectTupleLocals(n, hasRaisesPragma, result)
 
+proc badCalleeDiag(typeCache: var TypeCache; callee: Cursor; where: string) =
+  ## A call whose callee has no `(params ...)` type cannot be lowered. Say WHICH callee
+  ## and what type it got, then fail: a bare "[Assertion Failure]" gives no way to find
+  ## the offending call in a 40k-line module. The usual cause is a callee the semantic
+  ## checker left unresolved (a shadowing local, an unmodelled proc-typed field or closure).
+  var li = ""
+  if callee.info.isValid: li = " at " & infoToStr(callee.info)
+  stderr.writeLine "aowlhexer: " & where & ": callee `" & toString(callee, false) &
+    "` has type `" & toString(getType(typeCache, callee), false) &
+    "`, which is not a routine type" & li
+
 proc callCanRaise*(typeCache: var TypeCache; n: Cursor): bool =
   var fnType = skipProcTypeToParams(getType(typeCache, n.firstSon))
+  if fnType.tagEnum != ParamsTagId: badCalleeDiag(typeCache, n.firstSon, "callCanRaise")
   assert fnType.tagEnum == ParamsTagId
   skip fnType # params
   skip fnType # return type
@@ -126,6 +139,7 @@ proc trCall(c: var Context; dest: var TokenBuf; n: var Cursor; inhibit: bool) =
   let info = n.info
   inc n # skip `(call)`
   var fnType = skipProcTypeToParams(getType(c.typeCache, n))
+  if fnType.tagEnum != ParamsTagId: badCalleeDiag(c.typeCache, n, "trCall")
   assert fnType.tagEnum == ParamsTagId
   skip fnType # params
   let retType = fnType
